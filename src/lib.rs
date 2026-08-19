@@ -43,6 +43,9 @@ use hayro::vello_cpu::color::AlphaColor;
 use hayro::{RenderCache, RenderSettings};
 use std::alloc::{Layout, alloc, alloc_zeroed, dealloc};
 
+#[cfg(test)]
+mod tests;
+
 /// Byte length of a render-settings blob. See [`render_page`]'s docs for
 /// the exact layout.
 const RENDER_SETTINGS_LEN: usize = 16;
