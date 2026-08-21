@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hayro-wasm-bridge/schema/render-settings.schema.json",
+  "title": "RenderSettings",
+  "description": "Mirrors hayro::RenderSettings field-for-field except bg_color. Every field is optional; an absent field means \"use hayro's default for it\". This is documentation, kept in sync by hand with the RenderSettingsJson struct in src/lib.rs, not something validated against at runtime — serde's own typed deserialization there already rejects anything this schema would catch (wrong types, out-of-range numbers, unknown fields).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "x_scale": {
+      "type": "number",
+      "description": "Horizontal scale factor. Absent means \"use hayro's default\" (1.0). An explicit 0.0 is honored literally (producing a zero-area, and thus failing, render) - it is not treated the same as absent."
+    },
+    "y_scale": {
+      "type": "number",
+      "description": "Vertical scale factor. Absent means \"use hayro's default\" (1.0). Same explicit-zero handling as x_scale."
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "Target pixel width. Absent means \"auto\" (derived from the page size and scale)."
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "Target pixel height. Absent means \"auto\" (derived from the page size and scale)."
+    },
+    "bg_color": {
+      "$ref": "#/$defs/rgba",
+      "description": "Background color. Absent means \"use hayro's default\" (i.e. #00000000 - fully transparent black)."
+    }
+  },
+  "$defs": {
+    "rgba": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["r", "g", "b", "a"],
+      "description": "Straight (non-premultiplied) alpha, matching Go's image/color.NRGBA, not color.RGBA (which is premultiplied).",
+      "properties": {
+        "r": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "g": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "b": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "a": { "type": "integer", "minimum": 0, "maximum": 255 }
+      }
+    }
+  }
+}

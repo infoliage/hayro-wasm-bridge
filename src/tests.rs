@@ -47,23 +47,11 @@ startxref
 0
 %%EOF";
 
-/// Build a [`RENDER_SETTINGS_LEN`]-byte render-settings blob, per the layout
-/// documented on [`render_page`].
-fn render_settings_blob(x_scale: f32, y_scale: f32, width: u16, height: u16, rgba: [u8; 4]) -> [u8; RENDER_SETTINGS_LEN] {
-    let mut blob = [0u8; RENDER_SETTINGS_LEN];
-    blob[0..4].copy_from_slice(&x_scale.to_le_bytes());
-    blob[4..8].copy_from_slice(&y_scale.to_le_bytes());
-    blob[8..10].copy_from_slice(&width.to_le_bytes());
-    blob[10..12].copy_from_slice(&height.to_le_bytes());
-    blob[12..16].copy_from_slice(&rgba);
-    blob
-}
-
-// ---- Render-settings blob decoding ----------------------------------------
+// ---- Render-settings blob decoding -----------------------------------------
 
 #[test]
 fn render_settings_null_ptr_is_default() {
-    let settings = unsafe { read_render_settings(std::ptr::null()) };
+    let settings = unsafe { read_render_settings(std::ptr::null(), 0) }.unwrap();
     let defaults = RenderSettings::default();
     assert_eq!(settings.x_scale, defaults.x_scale);
     assert_eq!(settings.y_scale, defaults.y_scale);
@@ -73,12 +61,11 @@ fn render_settings_null_ptr_is_default() {
 }
 
 #[test]
-fn render_settings_zeroed_blob_is_default() {
-    // The whole point of every field's "0 means default" convention: a
-    // freshly `alloc_render_settings`'d (zeroed) blob must behave exactly
-    // like a null pointer / `RenderSettings::default()`.
-    let blob = [0u8; RENDER_SETTINGS_LEN];
-    let settings = unsafe { read_render_settings(blob.as_ptr()) };
+fn render_settings_empty_object_is_default() {
+    // `{}` is the JSON equivalent of the old zeroed-blob convention: every
+    // field absent, so every field falls back to `hayro`'s default.
+    let json = b"{}";
+    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
     let defaults = RenderSettings::default();
     assert_eq!(settings.x_scale, defaults.x_scale);
     assert_eq!(settings.y_scale, defaults.y_scale);
@@ -89,8 +76,8 @@ fn render_settings_zeroed_blob_is_default() {
 
 #[test]
 fn render_settings_decodes_explicit_values() {
-    let blob = render_settings_blob(2.5, 3.5, 800, 600, [10, 20, 30, 128]);
-    let settings = unsafe { read_render_settings(blob.as_ptr()) };
+    let json = br#"{"x_scale":2.5,"y_scale":3.5,"width":800,"height":600,"bg_color":{"r":10,"g":20,"b":30,"a":128}}"#;
+    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
     assert_eq!(settings.x_scale, 2.5);
     assert_eq!(settings.y_scale, 3.5);
     assert_eq!(settings.width, Some(800));
@@ -101,11 +88,86 @@ fn render_settings_decodes_explicit_values() {
     );
 }
 
+#[test]
+fn render_settings_partial_object_only_overrides_what_is_set() {
+    let json = br#"{"width":800}"#;
+    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
+    let defaults = RenderSettings::default();
+    assert_eq!(settings.width, Some(800));
+    assert_eq!(settings.height, defaults.height);
+    assert_eq!(settings.x_scale, defaults.x_scale);
+}
+
+#[test]
+fn render_settings_explicit_zero_scale_is_not_default() {
+    // The whole point of moving to real JSON `option`s instead of the old
+    // "0 means default" byte convention: an explicit 0.0 is honored
+    // literally now, not silently reinterpreted.
+    let json = br#"{"x_scale":0.0}"#;
+    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
+    assert_eq!(settings.x_scale, 0.0);
+}
+
+#[test]
+fn render_settings_malformed_json_is_an_error() {
+    let json = b"not json";
+    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn render_settings_unknown_field_is_an_error() {
+    // Catches typos/drift between the host and this module's field names,
+    // rather than silently ignoring an unrecognized field.
+    let json = br#"{"xscale":2.5}"#;
+    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn render_settings_wrong_field_type_is_an_error() {
+    let json = br#"{"x_scale":"not a number"}"#;
+    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn render_settings_out_of_range_number_is_an_error() {
+    // `width` is `u16`; 70000 overflows it.
+    let json = br#"{"width":70000}"#;
+    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
+
+    // `bg_color.r` is `u8`; 300 overflows it.
+    let json = br#"{"bg_color":{"r":300,"g":0,"b":0,"a":0}}"#;
+    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn render_settings_wrong_top_level_shape_is_an_error() {
+    // Valid JSON, but not an object - an array, a bare string, a bare
+    // number, and `null` should all be rejected the same as syntactically
+    // invalid JSON, not e.g. silently treated as "no fields set".
+    for json in [b"[1,2,3]".as_slice(), b"\"oops\"", b"42", b"null"] {
+        assert!(
+            unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
+}
+
+#[test]
+fn render_settings_empty_body_with_nonnull_ptr_is_an_error() {
+    // Distinct from a null pointer (which means "use every default"): a
+    // non-null pointer with a zero-length, empty JSON body isn't valid
+    // JSON at all, so it must be rejected rather than treated the same as
+    // "no settings supplied".
+    let empty: &[u8] = &[];
+    assert!(unsafe { read_render_settings(empty.as_ptr(), 0) }.is_err());
+}
+
 // ---- Interpreter-settings blob decoding ------------------------------------
 
 #[test]
 fn interpreter_settings_null_ptr_is_default() {
-    let settings = unsafe { read_interpreter_settings(std::ptr::null()) };
+    let settings = unsafe { read_interpreter_settings(std::ptr::null(), 0) }.unwrap();
     assert_eq!(
         settings.render_annotations,
         InterpreterSettings::default().render_annotations
@@ -113,9 +175,9 @@ fn interpreter_settings_null_ptr_is_default() {
 }
 
 #[test]
-fn interpreter_settings_zero_byte_is_default() {
-    let blob = [0u8; INTERPRETER_SETTINGS_LEN];
-    let settings = unsafe { read_interpreter_settings(blob.as_ptr()) };
+fn interpreter_settings_empty_object_is_default() {
+    let json = b"{}";
+    let settings = unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.unwrap();
     assert_eq!(
         settings.render_annotations,
         InterpreterSettings::default().render_annotations
@@ -123,19 +185,61 @@ fn interpreter_settings_zero_byte_is_default() {
 }
 
 #[test]
-fn interpreter_settings_one_byte_enables_annotations() {
-    let blob = [1u8; INTERPRETER_SETTINGS_LEN];
-    let settings = unsafe { read_interpreter_settings(blob.as_ptr()) };
+fn interpreter_settings_true_enables_annotations() {
+    let json = br#"{"render_annotations":true}"#;
+    let settings = unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.unwrap();
     assert!(settings.render_annotations);
 }
 
 #[test]
-fn interpreter_settings_other_bytes_disable_annotations() {
-    for byte in [2u8, 255u8] {
-        let blob = [byte; INTERPRETER_SETTINGS_LEN];
-        let settings = unsafe { read_interpreter_settings(blob.as_ptr()) };
-        assert!(!settings.render_annotations, "byte {byte} should disable annotations");
+fn interpreter_settings_false_disables_annotations() {
+    let json = br#"{"render_annotations":false}"#;
+    let settings = unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.unwrap();
+    assert!(!settings.render_annotations);
+}
+
+#[test]
+fn interpreter_settings_malformed_json_is_an_error() {
+    let json = b"{";
+    assert!(unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn interpreter_settings_wrong_field_type_is_an_error() {
+    let json = br#"{"render_annotations":"yes"}"#;
+    assert!(unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn interpreter_settings_unknown_field_is_an_error() {
+    let json = br#"{"renderAnnotations":true}"#;
+    assert!(unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn interpreter_settings_wrong_top_level_shape_is_an_error() {
+    // `[true]` is deliberately not in this list: serde's derived
+    // `Deserialize` for a struct accepts a JSON array positionally (field
+    // order = declaration order) as well as an object, and
+    // `InterpreterSettingsJson` has exactly one field, so a single-element
+    // array is legitimately equivalent to `{"render_annotations": true}`
+    // as far as serde is concerned - not a bug, just worth knowing about
+    // for a one-field settings struct specifically. `RenderSettingsJson`
+    // has five fields, so this doesn't come up for it (see the
+    // `render_settings` equivalent of this test).
+    for json in [b"[true, false]".as_slice(), b"\"oops\"", b"1", b"null"] {
+        assert!(
+            unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
     }
+}
+
+#[test]
+fn interpreter_settings_empty_body_with_nonnull_ptr_is_an_error() {
+    let empty: &[u8] = &[];
+    assert!(unsafe { read_interpreter_settings(empty.as_ptr(), 0) }.is_err());
 }
 
 // ---- Alloc/free pairs -------------------------------------------------------
@@ -159,31 +263,34 @@ fn alloc_pdf_round_trip() {
 }
 
 #[test]
-fn alloc_render_settings_is_zeroed() {
-    let ptr = alloc_render_settings();
+fn alloc_render_settings_round_trip() {
+    let ptr = alloc_render_settings(2);
     assert!(!ptr.is_null());
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, RENDER_SETTINGS_LEN) };
-    assert!(bytes.iter().all(|&b| b == 0));
-    unsafe { free_render_settings(ptr) };
+    unsafe { free_render_settings(ptr, 2) };
+}
+
+#[test]
+fn alloc_render_settings_zero_size_returns_null() {
+    assert!(alloc_render_settings(0).is_null());
 }
 
 #[test]
 fn free_render_settings_null_is_noop() {
-    unsafe { free_render_settings(std::ptr::null_mut()) };
+    unsafe { free_render_settings(std::ptr::null_mut(), 0) };
+    unsafe { free_render_settings(std::ptr::null_mut(), 2) };
 }
 
 #[test]
-fn alloc_interpreter_settings_is_zeroed() {
-    let ptr = alloc_interpreter_settings();
+fn alloc_interpreter_settings_round_trip() {
+    let ptr = alloc_interpreter_settings(2);
     assert!(!ptr.is_null());
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, INTERPRETER_SETTINGS_LEN) };
-    assert!(bytes.iter().all(|&b| b == 0));
-    unsafe { free_interpreter_settings(ptr) };
+    unsafe { free_interpreter_settings(ptr, 2) };
 }
 
 #[test]
 fn free_interpreter_settings_null_is_noop() {
-    unsafe { free_interpreter_settings(std::ptr::null_mut()) };
+    unsafe { free_interpreter_settings(std::ptr::null_mut(), 0) };
+    unsafe { free_interpreter_settings(std::ptr::null_mut(), 2) };
 }
 
 #[test]
@@ -216,7 +323,7 @@ fn free_pixels_zero_len_does_not_free_a_real_buffer() {
     unsafe { free_pdf(ptr, 4) };
 }
 
-// ---- page_count --------------------------------------------------------------
+// ---- page_count -------------------------------------------------------------
 
 #[test]
 fn page_count_valid_pdf() {
@@ -238,7 +345,7 @@ fn page_count_empty_buffer() {
     assert_eq!(n, -1);
 }
 
-// ---- render_page ---------------------------------------------------------------
+// ---- render_page --------------------------------------------------------------
 
 #[test]
 fn render_page_happy_path_defaults() {
@@ -250,7 +357,9 @@ fn render_page_happy_path_defaults() {
             MINIMAL_PDF.len(),
             1,
             std::ptr::null(),
+            0,
             std::ptr::null(),
+            0,
             &mut width_out,
             &mut height_out,
         )
@@ -271,7 +380,7 @@ fn render_page_happy_path_defaults() {
 
 #[test]
 fn render_page_width_height_override() {
-    let blob = render_settings_blob(0.0, 0.0, 400, 50, [0, 0, 0, 0]);
+    let json = br#"{"width":400,"height":50}"#;
     let mut width_out = 0u32;
     let mut height_out = 0u32;
     let ptr = unsafe {
@@ -280,7 +389,9 @@ fn render_page_width_height_override() {
             MINIMAL_PDF.len(),
             1,
             std::ptr::null(),
-            blob.as_ptr(),
+            0,
+            json.as_ptr(),
+            json.len(),
             &mut width_out,
             &mut height_out,
         )
@@ -293,11 +404,10 @@ fn render_page_width_height_override() {
 
 #[test]
 fn render_page_bg_color_override_shows_in_untouched_corner() {
-    // Auto width/height (0/0) keeps the natural 200x100 page size. The
-    // top-left pixel of the rendered image is well outside the "Hello
+    // The top-left pixel of the rendered image is well outside the "Hello
     // World" text (see `MINIMAL_PDF`'s doc comment), so it's guaranteed to
     // be pure background.
-    let blob = render_settings_blob(0.0, 0.0, 0, 0, [10, 20, 30, 255]);
+    let json = br#"{"bg_color":{"r":10,"g":20,"b":30,"a":255}}"#;
     let mut width_out = 0u32;
     let mut height_out = 0u32;
     let ptr = unsafe {
@@ -306,7 +416,9 @@ fn render_page_bg_color_override_shows_in_untouched_corner() {
             MINIMAL_PDF.len(),
             1,
             std::ptr::null(),
-            blob.as_ptr(),
+            0,
+            json.as_ptr(),
+            json.len(),
             &mut width_out,
             &mut height_out,
         )
@@ -326,7 +438,7 @@ fn render_page_zero_area_scale_returns_null() {
     // A tiny scale rounds the pixel dimensions down to 0x0 — confirmed
     // against a real `hayro` render while writing this test. `width_out`/
     // `height_out` must be left untouched (still their sentinel values).
-    let blob = render_settings_blob(0.0001, 0.0001, 0, 0, [0, 0, 0, 0]);
+    let json = br#"{"x_scale":0.0001,"y_scale":0.0001}"#;
     let mut width_out = 123u32;
     let mut height_out = 456u32;
     let ptr = unsafe {
@@ -335,7 +447,9 @@ fn render_page_zero_area_scale_returns_null() {
             MINIMAL_PDF.len(),
             1,
             std::ptr::null(),
-            blob.as_ptr(),
+            0,
+            json.as_ptr(),
+            json.len(),
             &mut width_out,
             &mut height_out,
         )
@@ -346,53 +460,22 @@ fn render_page_zero_area_scale_returns_null() {
 }
 
 #[test]
-fn render_page_zero_page_number_returns_null() {
+fn render_page_explicit_zero_scale_is_zero_area_not_default() {
+    // Confirms the semantic change end to end: `"x_scale":0.0` must *not*
+    // be reinterpreted as "use the default" the way the old byte layout's
+    // `0.0` sentinel was.
+    let json = br#"{"x_scale":0.0,"y_scale":0.0}"#;
     let mut width_out = 0u32;
     let mut height_out = 0u32;
     let ptr = unsafe {
         render_page(
             MINIMAL_PDF.as_ptr(),
             MINIMAL_PDF.len(),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            &mut width_out,
-            &mut height_out,
-        )
-    };
-    assert!(ptr.is_null());
-}
-
-#[test]
-fn render_page_out_of_range_page_number_returns_null() {
-    let mut width_out = 0u32;
-    let mut height_out = 0u32;
-    let ptr = unsafe {
-        render_page(
-            MINIMAL_PDF.as_ptr(),
-            MINIMAL_PDF.len(),
-            2, // MINIMAL_PDF only has 1 page
-            std::ptr::null(),
-            std::ptr::null(),
-            &mut width_out,
-            &mut height_out,
-        )
-    };
-    assert!(ptr.is_null());
-}
-
-#[test]
-fn render_page_malformed_pdf_returns_null() {
-    let bytes = b"not a pdf";
-    let mut width_out = 0u32;
-    let mut height_out = 0u32;
-    let ptr = unsafe {
-        render_page(
-            bytes.as_ptr(),
-            bytes.len(),
             1,
             std::ptr::null(),
-            std::ptr::null(),
+            0,
+            json.as_ptr(),
+            json.len(),
             &mut width_out,
             &mut height_out,
         )
@@ -401,13 +484,78 @@ fn render_page_malformed_pdf_returns_null() {
 }
 
 #[test]
-fn render_page_render_annotations_bytes_do_not_crash() {
+fn render_page_out_of_range_page_returns_null() {
+    let mut width_out = 0u32;
+    let mut height_out = 0u32;
+    let ptr = unsafe {
+        render_page(
+            MINIMAL_PDF.as_ptr(),
+            MINIMAL_PDF.len(),
+            2,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            &mut width_out,
+            &mut height_out,
+        )
+    };
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn render_page_malformed_render_settings_json_returns_null() {
+    let json = b"not json";
+    let mut width_out = 0u32;
+    let mut height_out = 0u32;
+    let ptr = unsafe {
+        render_page(
+            MINIMAL_PDF.as_ptr(),
+            MINIMAL_PDF.len(),
+            1,
+            std::ptr::null(),
+            0,
+            json.as_ptr(),
+            json.len(),
+            &mut width_out,
+            &mut height_out,
+        )
+    };
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn render_page_malformed_interpreter_settings_json_returns_null() {
+    let json = b"not json";
+    let mut width_out = 0u32;
+    let mut height_out = 0u32;
+    let ptr = unsafe {
+        render_page(
+            MINIMAL_PDF.as_ptr(),
+            MINIMAL_PDF.len(),
+            1,
+            json.as_ptr(),
+            json.len(),
+            std::ptr::null(),
+            0,
+            &mut width_out,
+            &mut height_out,
+        )
+    };
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn render_page_render_annotations_does_not_crash() {
     // `MINIMAL_PDF` has no annotations, so this only checks that the
     // interpreter-settings blob is decoded and plumbed through without
     // panicking/crashing, still producing a same-size image either way.
     // Actual annotation-rendering correctness is `hayro`'s own concern.
-    for byte in [1u8, 2u8] {
-        let blob = [byte; INTERPRETER_SETTINGS_LEN];
+    let payloads: [&[u8]; 2] = [
+        br#"{"render_annotations":true}"#,
+        br#"{"render_annotations":false}"#,
+    ];
+    for json in payloads {
         let mut width_out = 0u32;
         let mut height_out = 0u32;
         let ptr = unsafe {
@@ -415,8 +563,10 @@ fn render_page_render_annotations_bytes_do_not_crash() {
                 MINIMAL_PDF.as_ptr(),
                 MINIMAL_PDF.len(),
                 1,
-                blob.as_ptr(),
+                json.as_ptr(),
+                json.len(),
                 std::ptr::null(),
+                0,
                 &mut width_out,
                 &mut height_out,
             )

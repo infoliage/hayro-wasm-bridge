@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hayro-wasm-bridge/schema/interpreter-settings.schema.json",
+  "title": "InterpreterSettings",
+  "description": "Mirrors the subset of hayro_interpret::InterpreterSettings this bridge exposes. font_resolver/cmap_resolver/warning_sink are Rust closures with no plain-data representation and aren't part of this shape - see the crate README's \"zero required host imports\" goal. This is documentation, kept in sync by hand with the InterpreterSettingsJson struct in src/lib.rs, not something validated against at runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "render_annotations": {
+      "type": "boolean",
+      "description": "Absent means \"use hayro's default\" (read from InterpreterSettings::default() at call time, not hardcoded here)."
+    }
+  }
+}

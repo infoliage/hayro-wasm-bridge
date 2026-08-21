@@ -18,3 +18,5 @@ bytemuck = "1.25.2"
 # 14 fonts + predefined cmaps) keeps working here even if that default ever
 # changes upstream.
 hayro = { version = "0.7.1", features = ["embed-fonts", "embed-cmaps"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
