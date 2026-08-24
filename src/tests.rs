@@ -323,6 +323,30 @@ fn free_pixels_zero_len_does_not_free_a_real_buffer() {
     unsafe { free_pdf(ptr, 4) };
 }
 
+#[test]
+fn pixel_byte_len_normal_case() {
+    assert_eq!(pixel_byte_len(200, 100), Some(200 * 100 * 4));
+}
+
+#[test]
+fn pixel_byte_len_overflow_is_none() {
+    // u32::MAX * u32::MAX * 4 overflows even a u64 intermediate, not just
+    // usize - this pins down the actual return value, not just "didn't
+    // panic".
+    assert_eq!(pixel_byte_len(u32::MAX, u32::MAX), None);
+}
+
+#[test]
+fn free_pixels_overflowing_size_is_a_noop_not_ub() {
+    // Same overflow as above, but through the public free_pixels export:
+    // must decline to free rather than calling `dealloc` with a wrapped
+    // (and wrong) size, which would be undefined behavior.
+    let ptr = alloc_pdf(4);
+    assert!(!ptr.is_null());
+    unsafe { free_pixels(ptr, u32::MAX, u32::MAX) };
+    unsafe { free_pdf(ptr, 4) };
+}
+
 // ---- page_count -------------------------------------------------------------
 
 #[test]

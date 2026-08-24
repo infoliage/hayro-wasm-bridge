@@ -388,10 +388,21 @@ pub unsafe extern "C" fn render_page(
 /// `height` it reported for that call, that hasn't already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_pixels(ptr: *mut u8, width: u32, height: u32) {
-    let len = width as usize * height as usize * 4;
+    let Some(len) = pixel_byte_len(width, height) else {
+        return;
+    };
     // SAFETY: the caller upholds this function's safety contract; `ptr` was
-    // allocated with `layout_for(width * height * 4)`.
+    // allocated with `layout_for(len)`.
     unsafe { free_bytes(ptr, len) };
+}
+
+/// `width * height * 4`, or `None` if it would overflow `usize` (32 bits
+/// on this crate's `wasm32` target). `checked_mul`, chained, catches an
+/// overflow at either step.
+fn pixel_byte_len(width: u32, height: u32) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
 }
 
 /// Read a [`RenderSettings`] from the JSON object at `ptr`/`len`, or
