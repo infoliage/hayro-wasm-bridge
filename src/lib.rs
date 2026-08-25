@@ -48,12 +48,22 @@
 //! 5. Free everything you allocated: [`free_pdf`], [`free_render_settings`]/
 //!    [`free_interpreter_settings`] if you used them, [`free_u32`] (for
 //!    each of the two output cells), and [`free_pixels`] for the result.
+//!
+//! If all you need is a page's size or a document's metadata — not its
+//! pixels — [`page_info`]/[`document_info`] are much cheaper than the above:
+//! they still parse the PDF, but never reach the rendering step at all.
+//! They follow the same "host frees, and must pass the size back" shape as
+//! [`render_page`]'s settings blobs, just in the other direction — this
+//! module allocates the JSON and reports its length via an
+//! [`alloc_u32`]-obtained cell rather than the host allocating up front.
 
 use hayro::hayro_interpret::InterpreterSettings;
-use hayro::hayro_syntax::Pdf;
+use hayro::hayro_syntax::object::{DateTime, Rect};
+use hayro::hayro_syntax::page::{Page, Rotation};
+use hayro::hayro_syntax::{Pdf, PdfVersion};
 use hayro::vello_cpu::color::AlphaColor;
 use hayro::{RenderCache, RenderSettings};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::alloc::{Layout, alloc, alloc_zeroed, dealloc};
 
 #[cfg(test)]
@@ -98,6 +108,117 @@ struct RgbaJson {
 #[serde(deny_unknown_fields)]
 struct InterpreterSettingsJson {
     render_annotations: Option<bool>,
+}
+
+/// A PDF rectangle, `[x0 y0 x1 y1]`, in unrotated PDF user-space points.
+/// `hayro`'s `Rect` already normalizes `x0<=x1`/`y0<=y1` on parse, so no
+/// further normalization happens here.
+#[derive(Serialize)]
+struct RectJson {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+}
+
+impl From<Rect> for RectJson {
+    fn from(r: Rect) -> Self {
+        Self {
+            x0: r.x0,
+            y0: r.y0,
+            x1: r.x1,
+            y1: r.y1,
+        }
+    }
+}
+
+/// The JSON shape returned by [`page_info`] — see its docs for the
+/// authoritative field-by-field description, or
+/// `schema/page-info.schema.json`.
+#[derive(Serialize)]
+struct PageInfoJson {
+    width: f32,
+    height: f32,
+    rotation: u16,
+    media_box: RectJson,
+    crop_box: RectJson,
+}
+
+/// The JSON shape returned by [`document_info`] — see its docs for the
+/// authoritative field-by-field description, or
+/// `schema/document-info.schema.json`.
+#[derive(Serialize)]
+struct DocumentInfoJson {
+    page_count: i32,
+    version: &'static str,
+    title: Option<String>,
+    author: Option<String>,
+    subject: Option<String>,
+    keywords: Option<String>,
+    creator: Option<String>,
+    producer: Option<String>,
+    creation_date: Option<String>,
+    modification_date: Option<String>,
+}
+
+/// `rotation`'s degree value, normalized to `0..360` in `90`-steps — the
+/// inverse of how `hayro` itself maps a page's `/Rotate` entry to
+/// [`Rotation`].
+fn rotation_degrees(rotation: Rotation) -> u16 {
+    match rotation {
+        Rotation::None => 0,
+        Rotation::Horizontal => 90,
+        Rotation::Flipped => 180,
+        Rotation::FlippedHorizontal => 270,
+    }
+}
+
+/// `version`'s `"x.y"` string form. `PdfVersion` has no `Display`/`as_str`
+/// of its own, so this is this crate's own mapping — kept exhaustive (no
+/// wildcard arm) so a new `PdfVersion` variant upstream fails to compile
+/// here instead of silently falling back to something wrong.
+fn version_str(version: PdfVersion) -> &'static str {
+    match version {
+        PdfVersion::Pdf10 => "1.0",
+        PdfVersion::Pdf11 => "1.1",
+        PdfVersion::Pdf12 => "1.2",
+        PdfVersion::Pdf13 => "1.3",
+        PdfVersion::Pdf14 => "1.4",
+        PdfVersion::Pdf15 => "1.5",
+        PdfVersion::Pdf16 => "1.6",
+        PdfVersion::Pdf17 => "1.7",
+        PdfVersion::Pdf20 => "2.0",
+    }
+}
+
+/// Lossily decode one of `Metadata`'s `Option<Vec<u8>>` string fields to
+/// UTF-8 (invalid sequences become `U+FFFD`) — the PDF spec allows these to
+/// be arbitrary byte strings, and a stray non-UTF-8 byte shouldn't fail the
+/// whole [`document_info`] call.
+fn lossy_string(bytes: &Option<Vec<u8>>) -> Option<String> {
+    bytes
+        .as_deref()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+}
+
+/// Format a `hayro` `DateTime` as an ISO-8601 string, e.g.
+/// `"2020-01-02T03:04:05+05:30"`. `hayro` folds a bare `D:...Z` timestamp
+/// (explicit UTC) and one with no offset suffix at all into the same
+/// `utc_offset_hour: 0, utc_offset_minute: 0` — both round-trip here as
+/// `+00:00`, since the distinction isn't preserved upstream.
+fn date_str(dt: DateTime) -> String {
+    let sign = if dt.utc_offset_hour < 0 { '-' } else { '+' };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{sign}{:02}:{:02}",
+        dt.year,
+        dt.month,
+        dt.day,
+        dt.hour,
+        dt.minute,
+        dt.second,
+        dt.utc_offset_hour.unsigned_abs(),
+        dt.utc_offset_minute
+    )
 }
 
 /// Allocate `size` bytes inside this module's own memory for the host to
@@ -220,6 +341,46 @@ fn alloc_bytes(size: usize) -> *mut u8 {
     unsafe { alloc(layout_for(size)) }
 }
 
+/// Serialize `value` to JSON, copy it into a freshly allocated buffer,
+/// write its byte length to `*len_out`, and return a pointer to it — the
+/// shared plumbing behind [`page_info`] and [`document_info`]'s "Rust
+/// allocates, host frees" output convention. Unlike [`render_page`]'s pixel
+/// buffer, there's no `width * height * 4` formula the host can recompute
+/// the size from on its own, so the length is carried explicitly instead —
+/// same reasoning [`free_render_settings`]/[`free_interpreter_settings`]
+/// already need it for the settings blobs.
+///
+/// Returns a null pointer, with `*len_out` left untouched, if serialization
+/// fails (a bug in one of this module's `*Json` structs, not anything the
+/// caller did), the buffer would be too large for `len_out` to describe, or
+/// allocation fails.
+///
+/// # Safety
+/// `len_out` must point to a live, writable 4-byte `u32` cell.
+unsafe fn write_json<T: Serialize>(value: &T, len_out: *mut u32) -> *mut u8 {
+    let Ok(json) = serde_json::to_vec(value) else {
+        return std::ptr::null_mut();
+    };
+    // In practice every `*Json` struct here always serializes to at least
+    // `{}` (2 bytes) and nowhere near u32::MAX, but fail closed rather than
+    // truncate the length silently on either extreme.
+    let Ok(len) = u32::try_from(json.len()) else {
+        return std::ptr::null_mut();
+    };
+
+    let out = alloc_bytes(json.len());
+    if out.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // SAFETY: `out` was just allocated with `json.len()` bytes.
+    unsafe { std::ptr::copy_nonoverlapping(json.as_ptr(), out, json.len()) };
+    // SAFETY: the caller upholds this function's safety contract.
+    unsafe { *len_out = len };
+
+    out
+}
+
 /// Free a buffer previously returned by [`alloc_bytes`] with the same
 /// `size`.
 ///
@@ -237,23 +398,159 @@ unsafe fn free_bytes(ptr: *mut u8, size: usize) {
     unsafe { dealloc(ptr, layout_for(size)) };
 }
 
-/// Parse a PDF and return its page count, or `-1` if it could not be parsed.
+/// Look up a **1-based** `page_number` in `pdf`, returning `None` if it's
+/// `0` or past the end of the document. Shared by [`page_info`] and
+/// [`render_page`].
+fn resolve_page(pdf: &Pdf, page_number: u32) -> Option<&Page<'_>> {
+    page_number
+        .checked_sub(1)
+        .and_then(|idx| pdf.pages().get(idx as usize))
+}
+
+/// Return one page's geometry as a UTF-8 JSON blob, without rendering it —
+/// orders of magnitude cheaper than [`render_page`] when all a caller needs
+/// is the page size, e.g. to compute a thumbnail's aspect ratio before
+/// deciding what to render at.
 ///
-/// `pdf_ptr`/`pdf_len` describe a buffer previously written via
-/// [`alloc_pdf`].
+/// `page_number` is **1-based**, same as [`render_page`].
+///
+/// On success, writes the blob's byte length to `*len_out` and returns a
+/// pointer to it; the caller must free a non-null result with
+/// [`free_page_info`], passing the exact length that was written. Returns a
+/// null pointer (`0`), with `*len_out` left untouched, on failure — an
+/// unparseable PDF, an out-of-range `page_number`, or an internal
+/// serialization/allocation failure.
+///
+/// **JSON shape** — every field always present:
+/// - `width`, `height`: numbers, in points. The pixel size [`render_page`]
+///   would produce at `x_scale`/`y_scale` of `1.0` and no explicit
+///   `width`/`height` override — i.e. `hayro`'s `Page::render_dimensions()`,
+///   which already accounts for the page's `/Rotate` entry (swapped for a
+///   90°/270° rotation).
+/// - `rotation`: integer, one of `0`, `90`, `180`, `270` — the page's
+///   `/Rotate` entry, normalized to that range.
+/// - `media_box`, `crop_box`: objects `{"x0": .., "y0": .., "x1": .., "y1": ..}`,
+///   in unrotated PDF user-space points, straight from the page's
+///   `/MediaBox`/`/CropBox` (inherited from an ancestor `/Pages` node and
+///   defaulted per spec, same as `hayro` does internally) — *not*
+///   intersected or rotation-adjusted, unlike `width`/`height` above.
 ///
 /// # Safety
 /// `pdf_ptr`/`pdf_len` must describe a live, initialized buffer of
 /// `pdf_len` bytes — e.g. one obtained from [`alloc_pdf`] and fully written
-/// by the host.
+/// by the host. `len_out` must point to a live, writable 4-byte `u32` cell
+/// (obtained from [`alloc_u32`]).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn page_count(pdf_ptr: *const u8, pdf_len: usize) -> i32 {
+pub unsafe extern "C" fn page_info(
+    pdf_ptr: *const u8,
+    pdf_len: usize,
+    page_number: u32,
+    len_out: *mut u32,
+) -> *mut u8 {
     // SAFETY: the caller upholds this function's safety contract.
     let Some(pdf) = (unsafe { parse_pdf(pdf_ptr, pdf_len) }) else {
-        return -1;
+        return std::ptr::null_mut();
+    };
+    let Some(page) = resolve_page(&pdf, page_number) else {
+        return std::ptr::null_mut();
     };
 
-    pdf.pages().len() as i32
+    let (width, height) = page.render_dimensions();
+    let json = PageInfoJson {
+        width,
+        height,
+        rotation: rotation_degrees(page.rotation()),
+        media_box: page.media_box().into(),
+        crop_box: page.crop_box().into(),
+    };
+
+    // SAFETY: the caller upholds this function's safety contract.
+    unsafe { write_json(&json, len_out) }
+}
+
+/// Free a blob previously returned by [`page_info`]. `len` must be the
+/// exact value written to `len_out` for that call.
+///
+/// # Safety
+/// `ptr` must be null (in which case this is a no-op) or a pointer
+/// previously returned by [`page_info`] that hasn't already been freed,
+/// paired with the exact `len` it was returned with.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_page_info(ptr: *mut u8, len: u32) {
+    // SAFETY: the caller upholds this function's safety contract.
+    unsafe { free_bytes(ptr, len as usize) };
+}
+
+/// Return document-level information as a UTF-8 JSON blob — the same
+/// "parse but don't render" cheapness as [`page_info`], scoped to the whole
+/// document rather than one page.
+///
+/// On success, writes the blob's byte length to `*len_out` and returns a
+/// pointer to it; free a non-null result with [`free_document_info`], same
+/// convention as [`page_info`]/[`free_page_info`]. Returns a null pointer
+/// (`0`), with `*len_out` left untouched, on failure — an unparseable PDF
+/// or an internal serialization/allocation failure.
+///
+/// **JSON shape** — every field always present; the metadata fields
+/// (`title` through `producer`) and both dates are `null` when the PDF's
+/// document information dictionary doesn't set them:
+/// - `page_count`: integer — the document's page count
+///   (`pdf.pages().len()`).
+/// - `version`: string, one of `"1.0"` through `"1.7"` or `"2.0"` — the
+///   effective PDF version (the document's trailer `/Version`, if set and
+///   valid, otherwise the `%PDF-x.y` header).
+/// - `title`, `author`, `subject`, `keywords`, `creator`, `producer`:
+///   strings or `null`, from the document information dictionary. PDF
+///   allows these to be arbitrary byte strings; non-UTF-8 bytes are
+///   lossily replaced (`U+FFFD`) rather than failing the whole call.
+/// - `creation_date`, `modification_date`: ISO-8601 strings (e.g.
+///   `"2020-01-02T03:04:05+05:30"`) or `null`.
+///
+/// # Safety
+/// `pdf_ptr`/`pdf_len` must describe a live, initialized buffer of
+/// `pdf_len` bytes — e.g. one obtained from [`alloc_pdf`] and fully written
+/// by the host. `len_out` must point to a live, writable 4-byte `u32` cell
+/// (obtained from [`alloc_u32`]).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn document_info(
+    pdf_ptr: *const u8,
+    pdf_len: usize,
+    len_out: *mut u32,
+) -> *mut u8 {
+    // SAFETY: the caller upholds this function's safety contract.
+    let Some(pdf) = (unsafe { parse_pdf(pdf_ptr, pdf_len) }) else {
+        return std::ptr::null_mut();
+    };
+
+    let metadata = pdf.metadata();
+    let json = DocumentInfoJson {
+        page_count: pdf.pages().len() as i32,
+        version: version_str(pdf.version()),
+        title: lossy_string(&metadata.title),
+        author: lossy_string(&metadata.author),
+        subject: lossy_string(&metadata.subject),
+        keywords: lossy_string(&metadata.keywords),
+        creator: lossy_string(&metadata.creator),
+        producer: lossy_string(&metadata.producer),
+        creation_date: metadata.creation_date.map(date_str),
+        modification_date: metadata.modification_date.map(date_str),
+    };
+
+    // SAFETY: the caller upholds this function's safety contract.
+    unsafe { write_json(&json, len_out) }
+}
+
+/// Free a blob previously returned by [`document_info`]. `len` must be the
+/// exact value written to `len_out` for that call.
+///
+/// # Safety
+/// `ptr` must be null (in which case this is a no-op) or a pointer
+/// previously returned by [`document_info`] that hasn't already been freed,
+/// paired with the exact `len` it was returned with.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_document_info(ptr: *mut u8, len: u32) {
+    // SAFETY: the caller upholds this function's safety contract.
+    unsafe { free_bytes(ptr, len as usize) };
 }
 
 /// Render one page of a PDF to a raw RGBA8 pixmap.
@@ -315,8 +612,9 @@ pub unsafe extern "C" fn page_count(pdf_ptr: *const u8, pdf_len: usize) -> i32 {
 /// `height_out`.
 ///
 /// # Safety
-/// `pdf_ptr`/`pdf_len` must describe a live, initialized buffer, as required
-/// by [`page_count`]. `interpreter_settings_ptr`/`render_settings_ptr` must
+/// `pdf_ptr`/`pdf_len` must describe a live, initialized buffer of
+/// `pdf_len` bytes — e.g. one obtained from [`alloc_pdf`] and fully written
+/// by the host. `interpreter_settings_ptr`/`render_settings_ptr` must
 /// each be null (with a length of `0`) or point to a live, initialized
 /// buffer of the given length. `width_out`/`height_out` must each point to
 /// a live, writable 4-byte `u32` cell.
@@ -336,10 +634,7 @@ pub unsafe extern "C" fn render_page(
     let Some(pdf) = (unsafe { parse_pdf(pdf_ptr, pdf_len) }) else {
         return std::ptr::null_mut();
     };
-    let Some(page) = page_number
-        .checked_sub(1)
-        .and_then(|idx| pdf.pages().get(idx as usize))
-    else {
+    let Some(page) = resolve_page(&pdf, page_number) else {
         return std::ptr::null_mut();
     };
 

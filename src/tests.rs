@@ -47,6 +47,43 @@ startxref
 0
 %%EOF";
 
+/// Same page geometry as `MINIMAL_PDF` (a 200x100pt page), but with a
+/// `/Rotate 90` entry and a full document information dictionary — for
+/// exercising [`page_info`]'s rotation handling and [`document_info`]'s
+/// metadata/date decoding. `CreationDate` carries an explicit `+05'30'`
+/// offset, `ModDate` a bare `Z` (both should round-trip through
+/// [`date_str`], `Z` folding to `+00:00` same as no offset at all).
+const PDF_ROTATED_WITH_METADATA: &[u8] = b"%PDF-1.5
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Rotate 90 /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 58 >>
+stream
+BT /F1 24 Tf 20 40 Td (Hello World) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+6 0 obj
+<< /Title (My Title) /Author (Jane Doe) /Subject (A Subject) /Keywords (foo bar) /Creator (My Creator) /Producer (My Producer) /CreationDate (D:20200102030405+05'30') /ModDate (D:20210607080910Z) >>
+endobj
+xref
+0 7
+0000000000 65535 f
+trailer
+<< /Size 7 /Root 1 0 R /Info 6 0 R >>
+startxref
+0
+%%EOF";
+
 // ---- Render-settings blob decoding -----------------------------------------
 
 #[test]
@@ -347,28 +384,6 @@ fn free_pixels_overflowing_size_is_a_noop_not_ub() {
     unsafe { free_pdf(ptr, 4) };
 }
 
-// ---- page_count -------------------------------------------------------------
-
-#[test]
-fn page_count_valid_pdf() {
-    let n = unsafe { page_count(MINIMAL_PDF.as_ptr(), MINIMAL_PDF.len()) };
-    assert_eq!(n, 1);
-}
-
-#[test]
-fn page_count_garbage_bytes() {
-    let bytes = b"not a pdf";
-    let n = unsafe { page_count(bytes.as_ptr(), bytes.len()) };
-    assert_eq!(n, -1);
-}
-
-#[test]
-fn page_count_empty_buffer() {
-    let empty: &[u8] = &[];
-    let n = unsafe { page_count(empty.as_ptr(), 0) };
-    assert_eq!(n, -1);
-}
-
 // ---- render_page --------------------------------------------------------------
 
 #[test]
@@ -600,4 +615,166 @@ fn render_page_render_annotations_does_not_crash() {
         assert_eq!(height_out, 100);
         unsafe { free_pixels(ptr, width_out, height_out) };
     }
+}
+
+// ---- page_info ----------------------------------------------------------
+
+/// Parse a blob returned by [`page_info`]/[`document_info`] back into a
+/// `serde_json::Value`, for asserting against by field.
+unsafe fn parse_json_out(ptr: *mut u8, len: u32) -> serde_json::Value {
+    // SAFETY: the caller upholds this function's safety contract (`ptr`
+    // must describe `len` live, initialized bytes).
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    serde_json::from_slice(bytes).expect("page_info/document_info should emit valid JSON")
+}
+
+#[test]
+fn page_info_happy_path_defaults() {
+    let mut len_out = 0u32;
+    let ptr = unsafe { page_info(MINIMAL_PDF.as_ptr(), MINIMAL_PDF.len(), 1, &mut len_out) };
+    assert!(!ptr.is_null());
+
+    let json = unsafe { parse_json_out(ptr, len_out) };
+    assert_eq!(json["width"], 200.0);
+    assert_eq!(json["height"], 100.0);
+    assert_eq!(json["rotation"], 0);
+    assert_eq!(
+        json["media_box"],
+        serde_json::json!({"x0": 0.0, "y0": 0.0, "x1": 200.0, "y1": 100.0})
+    );
+    assert_eq!(json["crop_box"], json["media_box"]);
+
+    unsafe { free_page_info(ptr, len_out) };
+}
+
+#[test]
+fn page_info_rotation_swaps_render_dimensions_but_not_boxes() {
+    let mut len_out = 0u32;
+    let ptr = unsafe {
+        page_info(
+            PDF_ROTATED_WITH_METADATA.as_ptr(),
+            PDF_ROTATED_WITH_METADATA.len(),
+            1,
+            &mut len_out,
+        )
+    };
+    assert!(!ptr.is_null());
+
+    let json = unsafe { parse_json_out(ptr, len_out) };
+    assert_eq!(json["rotation"], 90);
+    // `width`/`height` (render_dimensions) are swapped for a 90° rotation...
+    assert_eq!(json["width"], 100.0);
+    assert_eq!(json["height"], 200.0);
+    // ...but the raw media/crop boxes are not.
+    assert_eq!(
+        json["media_box"],
+        serde_json::json!({"x0": 0.0, "y0": 0.0, "x1": 200.0, "y1": 100.0})
+    );
+
+    unsafe { free_page_info(ptr, len_out) };
+}
+
+#[test]
+fn page_info_page_number_zero_returns_null() {
+    let mut len_out = 0u32;
+    let ptr = unsafe { page_info(MINIMAL_PDF.as_ptr(), MINIMAL_PDF.len(), 0, &mut len_out) };
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn page_info_out_of_range_page_returns_null() {
+    let mut len_out = 0u32;
+    let ptr = unsafe { page_info(MINIMAL_PDF.as_ptr(), MINIMAL_PDF.len(), 2, &mut len_out) };
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn page_info_garbage_pdf_returns_null() {
+    let bytes = b"not a pdf";
+    let mut len_out = 0u32;
+    let ptr = unsafe { page_info(bytes.as_ptr(), bytes.len(), 1, &mut len_out) };
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn free_page_info_null_is_noop() {
+    unsafe { free_page_info(std::ptr::null_mut(), 0) };
+}
+
+// ---- document_info --------------------------------------------------------
+
+#[test]
+fn document_info_no_info_dict_is_all_null_but_page_count_and_version_are_set() {
+    let mut len_out = 0u32;
+    let ptr = unsafe { document_info(MINIMAL_PDF.as_ptr(), MINIMAL_PDF.len(), &mut len_out) };
+    assert!(!ptr.is_null());
+
+    let json = unsafe { parse_json_out(ptr, len_out) };
+    assert_eq!(json["page_count"], 1);
+    assert_eq!(json["version"], "1.1");
+    for field in [
+        "title",
+        "author",
+        "subject",
+        "keywords",
+        "creator",
+        "producer",
+        "creation_date",
+        "modification_date",
+    ] {
+        assert!(json[field].is_null(), "expected {field} to be null");
+    }
+
+    unsafe { free_document_info(ptr, len_out) };
+}
+
+#[test]
+fn document_info_decodes_metadata_and_dates() {
+    let mut len_out = 0u32;
+    let ptr = unsafe {
+        document_info(
+            PDF_ROTATED_WITH_METADATA.as_ptr(),
+            PDF_ROTATED_WITH_METADATA.len(),
+            &mut len_out,
+        )
+    };
+    assert!(!ptr.is_null());
+
+    let json = unsafe { parse_json_out(ptr, len_out) };
+    assert_eq!(json["page_count"], 1);
+    assert_eq!(json["version"], "1.5");
+    assert_eq!(json["title"], "My Title");
+    assert_eq!(json["author"], "Jane Doe");
+    assert_eq!(json["subject"], "A Subject");
+    assert_eq!(json["keywords"], "foo bar");
+    assert_eq!(json["creator"], "My Creator");
+    assert_eq!(json["producer"], "My Producer");
+    assert_eq!(json["creation_date"], "2020-01-02T03:04:05+05:30");
+    // `ModDate`'s bare `Z` and "no offset suffix at all" both parse to the
+    // same zeroed-offset representation upstream, so this round-trips as
+    // `+00:00`, not `Z`.
+    assert_eq!(json["modification_date"], "2021-06-07T08:09:10+00:00");
+
+    unsafe { free_document_info(ptr, len_out) };
+}
+
+#[test]
+fn document_info_garbage_pdf_returns_null() {
+    let bytes = b"not a pdf";
+    let mut len_out = 0u32;
+    let ptr = unsafe { document_info(bytes.as_ptr(), bytes.len(), &mut len_out) };
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn document_info_empty_buffer_returns_null() {
+    let empty: &[u8] = &[];
+    let mut len_out = 0u32;
+    let ptr = unsafe { document_info(empty.as_ptr(), 0, &mut len_out) };
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn free_document_info_null_is_noop() {
+    unsafe { free_document_info(std::ptr::null_mut(), 0) };
 }

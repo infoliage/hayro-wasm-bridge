@@ -43,9 +43,26 @@ Exported functions:
   Reserve a zeroed 4-byte `u32` cell, for use as one of `render_page`'s
   `width_out`/`height_out` arguments, and free one.
 
-- `page_count(pdf_ptr, pdf_len) -> i32`
-  Parse the PDF at `pdf_ptr`/`pdf_len` and return its page count, or `-1` if
-  it couldn't be parsed.
+- `page_info(pdf_ptr, pdf_len, page_number, len_out) -> ptr` / `free_page_info(ptr, len)`
+  Parse the PDF and return one page's geometry (`schema/page-info.schema.json`)
+  as a UTF-8 JSON blob, **without rendering it** — orders of magnitude
+  cheaper than `render_page` when all you need is the page size, e.g. to
+  compute a thumbnail's aspect ratio before deciding what to render at.
+  `page_number` is **1-based**, same as `render_page`. On success, writes
+  the blob's byte length to `*len_out` (a `u32` cell, obtained from
+  `alloc_u32`) and returns a pointer to it; free a non-null result with
+  `free_page_info`, passing the exact length that was written. Returns a
+  null pointer (`0`) on failure (unparseable PDF, out-of-range
+  `page_number`), in which case `*len_out` is left untouched.
+
+- `document_info(pdf_ptr, pdf_len, len_out) -> ptr` / `free_document_info(ptr, len)`
+  Same "parse but don't render" cheapness as `page_info`, but scoped to the
+  whole document rather than one page: page count, PDF version, and the
+  document information dictionary's metadata (title/author/subject/
+  keywords/creator/producer, creation/modification dates) as a UTF-8 JSON
+  blob (`schema/document-info.schema.json`). Every field is always present;
+  the metadata fields and dates are `null` when the PDF doesn't set them.
+  Same `len_out`/free convention as `page_info`.
 
 - `render_page(pdf_ptr, pdf_len, page_number, interpreter_settings_ptr, interpreter_settings_len, render_settings_ptr, render_settings_len, width_out, height_out) -> ptr`
   Render one page (`page_number` is **1-based**) to RGBA8 pixels
