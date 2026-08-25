@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hayro-wasm-bridge/schema/document-info.schema.json",
+  "title": "DocumentInfo",
+  "description": "The JSON blob returned by document_info. Every field is always present; the metadata fields (title through producer) and both dates are null when the PDF's document information dictionary doesn't set them. This is documentation, kept in sync by hand with the DocumentInfoJson struct in src/lib.rs, not something validated against at runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "page_count",
+    "version",
+    "title",
+    "author",
+    "subject",
+    "keywords",
+    "creator",
+    "producer",
+    "creation_date",
+    "modification_date"
+  ],
+  "properties": {
+    "page_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The document's page count."
+    },
+    "version": {
+      "type": "string",
+      "enum": ["1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "2.0"],
+      "description": "The effective PDF version - the document's trailer /Version, if set and valid, otherwise the %PDF-x.y header."
+    },
+    "title": { "$ref": "#/$defs/metadata_string" },
+    "author": { "$ref": "#/$defs/metadata_string" },
+    "subject": { "$ref": "#/$defs/metadata_string" },
+    "keywords": { "$ref": "#/$defs/metadata_string" },
+    "creator": { "$ref": "#/$defs/metadata_string" },
+    "producer": { "$ref": "#/$defs/metadata_string" },
+    "creation_date": { "$ref": "#/$defs/date" },
+    "modification_date": { "$ref": "#/$defs/date" }
+  },
+  "$defs": {
+    "metadata_string": {
+      "type": ["string", "null"],
+      "description": "From the document information dictionary. PDF allows these to be arbitrary byte strings; non-UTF-8 bytes are lossily replaced (U+FFFD) rather than failing the whole call. null if the field is absent from the dictionary, or if there is no document information dictionary at all."
+    },
+    "date": {
+      "type": ["string", "null"],
+      "description": "ISO-8601, e.g. \"2020-01-02T03:04:05+05:30\". A bare \"Z\" (explicit UTC) and no offset suffix at all both round-trip as \"+00:00\" - hayro's own DateTime doesn't distinguish them."
+    }
+  }
+}

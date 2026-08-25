@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hayro-wasm-bridge/schema/page-info.schema.json",
+  "title": "PageInfo",
+  "description": "The JSON blob returned by page_info. Every field is always present. This is documentation, kept in sync by hand with the PageInfoJson struct in src/lib.rs, not something validated against at runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["width", "height", "rotation", "media_box", "crop_box"],
+  "properties": {
+    "width": {
+      "type": "number",
+      "description": "Page width in points. The pixel width render_page would produce at x_scale 1.0 and no explicit width override, i.e. hayro's Page::render_dimensions() - already accounts for the page's /Rotate entry (swapped for a 90/270 degree rotation)."
+    },
+    "height": {
+      "type": "number",
+      "description": "Page height in points. Same derivation as width, via render_dimensions()."
+    },
+    "rotation": {
+      "type": "integer",
+      "enum": [0, 90, 180, 270],
+      "description": "The page's /Rotate entry, normalized to this range."
+    },
+    "media_box": {
+      "$ref": "#/$defs/rect",
+      "description": "The page's /MediaBox (inherited from an ancestor /Pages node and defaulted per spec if absent, same as hayro does internally). Unrotated, unlike width/height above."
+    },
+    "crop_box": {
+      "$ref": "#/$defs/rect",
+      "description": "The page's /CropBox, same inheritance/defaulting as media_box (defaults to media_box itself if absent). Not intersected with media_box, and unrotated, unlike width/height above."
+    }
+  },
+  "$defs": {
+    "rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x0", "y0", "x1", "y1"],
+      "description": "A rectangle in unrotated PDF user-space points, with x0<=x1 and y0<=y1.",
+      "properties": {
+        "x0": { "type": "number" },
+        "y0": { "type": "number" },
+        "x1": { "type": "number" },
+        "y1": { "type": "number" }
+      }
+    }
+  }
+}
