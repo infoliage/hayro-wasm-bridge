@@ -54,7 +54,7 @@ use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::AlphaColor;
 use hayro::{RenderCache, RenderSettings};
 use serde::Deserialize;
-use std::alloc::{Layout, alloc, dealloc};
+use std::alloc::{Layout, alloc, alloc_zeroed, dealloc};
 
 #[cfg(test)]
 mod tests;
@@ -170,11 +170,18 @@ pub unsafe extern "C" fn free_interpreter_settings(ptr: *mut u8, size: usize) {
     unsafe { free_bytes(ptr, size) };
 }
 
-/// Allocate a zeroed 4-byte `u32` cell, for use as one of [`render_page`]'s
-/// `width_out`/`height_out` arguments.
+fn layout_u32() -> Layout {
+    return Layout::new::<u32>();
+}
+
+
+/// Allocate a zeroed, 4-byte, 4-byte-aligned `u32` cell, for use as one of
+/// [`render_page`]'s
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_u32() -> *mut u32 {
-    alloc_bytes(4).cast()
+    // SAFETY: `layout_u32()`'s size (4) is non-zero, `alloc_zeroed`'s one
+    // precondition.
+    unsafe { alloc_zeroed(layout_u32()) }.cast()
 }
 
 /// Free a cell previously returned by [`alloc_u32`].
@@ -184,9 +191,16 @@ pub extern "C" fn alloc_u32() -> *mut u32 {
 /// previously returned by [`alloc_u32`] that hasn't already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_u32(ptr: *mut u32) {
-    // SAFETY: the caller upholds this function's safety contract; `ptr` was
-    // allocated with `layout_for(4)`.
-    unsafe { free_bytes(ptr.cast(), 4) };
+    if ptr.is_null() {
+        return;
+    }
+
+    // SAFETY: the caller upholds this function's safety contract; `ptr`
+    // was allocated with `layout_u32()` (by `alloc_u32`, the only producer
+    // of pointers this function accepts) — `dealloc` requires the exact
+    // layout `alloc`/`alloc_zeroed` was called with, not just a
+    // same-sized one.
+    unsafe { dealloc(ptr.cast(), layout_u32()) };
 }
 
 fn layout_for(size: usize) -> Layout {
