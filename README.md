@@ -1,3 +1,10 @@
+```
+Copyright 2026 Infoliage LLC. All rights reserved.
+Use is subject to license terms.
+
+SPDX-License-Identifier: Apache-2.0 OR MIT
+```
+
 # hayro-wasm-bridge
 
 A WASM build of [`hayro`](https://crates.io/crates/hayro) (a pure-Rust PDF

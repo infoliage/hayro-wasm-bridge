@@ -2,6 +2,9 @@
 name = "hayro-wasm-bridge"
 version = "0.1.0"
 edition = "2024"
+readme = "README.md"
+repository = "https://github.com/infoliage/hayro-wasm-bridge"
+license = "Apache-2.0 OR MIT"
 
 # "cdylib" ("C dynamic library") tells cargo to emit a standalone binary with
 # a plain exported-function interface, instead of the default "rlib" (which
