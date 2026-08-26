@@ -1,3 +1,9 @@
+//!
+//! Copyright 2026 Infoliage LLC. All Rights Reserved.
+//! Use is subject to license terms.
+//!
+//! SPDX-License-Identifier: Apache-2.0 OR MIT
+//!
 //! Tests for the C-ABI boundary in `lib.rs`.
 //!
 //! These run against the native host target via plain `cargo test` — they
