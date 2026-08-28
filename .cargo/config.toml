@@ -1,0 +1,11 @@
+# Enable WASM SIMD128 for this crate's only real build target. Both of
+# hayro's SIMD backends (pic-scale, fearless_simd) ship wasm32 kernels, but
+# gate them behind `target_feature = "simd128"` — which is not on by
+# default for wasm32-unknown-unknown and must be requested explicitly. See
+# fearless_simd's own crate docs ("# WebAssembly" section) for the same
+# recommendation.
+#
+# Requires a WASM host with the SIMD proposal enabled (wazero and wasmtime
+# both qualify).
+[target.'cfg(target_arch = "wasm32")']
+rustflags = ["-Ctarget-feature=+simd128"]
