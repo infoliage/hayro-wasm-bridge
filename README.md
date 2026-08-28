@@ -18,6 +18,12 @@ cargo build --target wasm32-unknown-unknown --release
 
 produces `target/wasm32-unknown-unknown/release/hayro_wasm_bridge.wasm`.
 
+`.cargo/config.toml` enables the `simd128` target feature for this build
+(off by default for `wasm32-unknown-unknown`) — required for `hayro`'s
+`pic-scale`/`fearless_simd`-backed SIMD kernels to actually compile in for
+wasm; without it they silently fall back to scalar code. Requires a wasm
+host with the SIMD proposal enabled (wazero and wasmtime both qualify).
+
 ## Calling convention
 
 The two Hayro settings blobs (`RenderSettings`/`InterpreterSettings`) are UTF-8
