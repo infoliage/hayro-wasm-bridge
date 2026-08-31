@@ -1,14 +1,11 @@
 # hayro-wasm-bridge
 
-A minimal wasm build of [`hayro`](https://crates.io/crates/hayro) (a pure-Rust
-PDF rasterizer) exposing a C-style function interface, meant to be called from
-a non-browser wasm host — e.g. Go, via a runtime like
-[`wazero`](https://wazero.io).
-
-This crate builds the same underlying `hayro` library with a `cdylib`
-target and a hand-written `extern "C"` boundary instead, so the resulting
-`.wasm` module has **zero required host imports** — any wasm runtime can
-load it.
+A WASM build of [`hayro`](https://crates.io/crates/hayro) (a pure-Rust PDF
+rasterizer) exposing a C-style function interface, meant to be called from a
+non-browser wasm host — e.g. Go, via a runtime like
+[`wazero`](https://wazero.io).  The resulting `.wasm` is about 5MB, and has
+zero required host imports, so any wasm runtime can
+load it.  This build enables https://github.com/infoliage/hayro-wasm-go/.
 
 ## Building
 
@@ -18,11 +15,9 @@ cargo build --target wasm32-unknown-unknown --release
 
 produces `target/wasm32-unknown-unknown/release/hayro_wasm_bridge.wasm`.
 
-`.cargo/config.toml` enables the `simd128` target feature for this build
-(off by default for `wasm32-unknown-unknown`) — required for `hayro`'s
-`pic-scale`/`fearless_simd`-backed SIMD kernels to actually compile in for
-wasm; without it they silently fall back to scalar code. Requires a wasm
-host with the SIMD proposal enabled (wazero and wasmtime both qualify).
+Note that `.cargo/config.toml` enables the `simd128` target feature for this
+build, and so the WASM host must have SIMD enabled (wazero and wasmtime both
+qualify).
 
 ## Calling convention
 
