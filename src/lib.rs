@@ -1,61 +1,37 @@
 //! A minimal C-ABI wasm bridge around the `hayro` PDF rasterizer.
 //!
-//! This is deliberately *not* built on `wasm-bindgen` (see the README for
-//! why). Instead every function here speaks only in plain numbers — the one
-//! thing every wasm host, including a Go one, understands natively:
-//! pointers (just an offset into the module's own memory, given as a
-//! `usize`/`u32`) and lengths. There is no way to hand a Rust `Vec<u8>` or
-//! `struct` across the boundary directly, so the host and this module
-//! cooperate by reading and writing bytes at agreed-upon offsets in the
-//! module's linear memory instead.
+//! This is deliberately *not* built on `wasm-bindgen` so that there are
+//! zero dependencies.  The host and this module cooperate by reading
+//! and writing bytes at agreed-upon offsets in the module's linear memory
+//! instead.  JSON is used as a lightweight marshalled format when the
+//! arguments are structures.
 //!
 //! Memory is allocated and freed with a dedicated pair of functions per
 //! kind of thing crossing the boundary ([`alloc_pdf`]/[`free_pdf`],
-//! [`alloc_render_settings`]/[`free_render_settings`], and so on), rather
-//! than one generic `alloc(size)`/`free(ptr, size)` pair. The one thing
-//! this buys the fixed-size kinds — the function you call *is* the size,
-//! so a mismatch between what a buffer was allocated with and what it's
-//! freed with isn't expressible — doesn't apply to any of these anymore:
-//! the settings blobs are JSON now, so every buffer here is genuinely
-//! variable-length and the host must pass the size back to free it, same
-//! as [`alloc_pdf`]/[`free_pdf`] always required.
+//! [`alloc_render_settings`]/[`free_render_settings`], and so on).
 //!
 //! The settings blobs are UTF-8 JSON text, one object each, matching
 //! [`RenderSettings`]/`InterpreterSettings`'s field names. Every field is
-//! optional; an absent field means "use `hayro`'s default for it" — see
-//! [`render_page`] for the exact shape of each, and `schema/*.json` in this
-//! crate's repo for a JSON Schema description of both, kept as
-//! documentation (not validated against at runtime — `serde`'s own typed
-//! deserialization already rejects anything the schema would catch: wrong
-//! types, out-of-range numbers, unknown fields).
+//! optional; an absent field means "use `hayro`'s default for it."
 //!
 //! Calling convention, from the host's side:
 //! 1. Call [`alloc_pdf`] to reserve space for the PDF's bytes, and write
 //!    them into the module's memory at the returned offset.
+//! 2. Call [`document_info`] unless you know the exact document structure
+//!    in advance.
 //! 2. Optionally call [`alloc_render_settings`] and/or
 //!    [`alloc_interpreter_settings`] and write a JSON object into the
 //!    result, if you want anything other than `hayro`'s defaults — see
 //!    [`render_page`] for the shape of each. Omit whichever fields you
 //!    don't care about; pass a null pointer (and a length of `0`) for
-//!    either blob entirely to use every one of `hayro`'s defaults.
+//!    either blob to fully accept `hayro`'s defaults.
 //! 3. Call [`alloc_u32`] twice, for [`render_page`]'s `width_out`/
 //!    `height_out` arguments.
 //! 4. Call [`render_page`]. It returns a pointer to `width * height * 4`
-//!    bytes of RGBA8 pixel data (non-premultiplied, one byte per channel),
-//!    or `0` = null on failure (which now also includes malformed settings
-//!    JSON, not just an unparseable PDF, an out-of-range page, or a
-//!    zero-area render).
+//!    bytes of RGBA8 pixel data or `0` = null on failure.
 //! 5. Free everything you allocated: [`free_pdf`], [`free_render_settings`]/
 //!    [`free_interpreter_settings`] if you used them, [`free_u32`] (for
 //!    each of the two output cells), and [`free_pixels`] for the result.
-//!
-//! If all you need is a page's size or a document's metadata — not its
-//! pixels — [`page_info`]/[`document_info`] are much cheaper than the above:
-//! they still parse the PDF, but never reach the rendering step at all.
-//! They follow the same "host frees, and must pass the size back" shape as
-//! [`render_page`]'s settings blobs, just in the other direction — this
-//! module allocates the JSON and reports its length via an
-//! [`alloc_u32`]-obtained cell rather than the host allocating up front.
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::object::{DateTime, Rect};
@@ -224,18 +200,16 @@ fn date_str(dt: DateTime) -> String {
 /// Allocate `size` bytes inside this module's own memory for the host to
 /// write a PDF file's bytes into, and return a pointer to the start of it.
 ///
-/// Every pointer this function hands back must eventually be passed to
-/// [`free_pdf`], with the exact same `size` used to allocate it — Rust's
-/// allocator needs that size again to free the memory correctly; there's no
-/// separate bookkeeping of "how big was this block" the way libc's
-/// `malloc`/`free` do it for you.
+/// Every buffer this function hands back must eventually be freed with
+/// [`free_pdf`], with the exact `size` used to allocate it.
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_pdf(size: usize) -> *mut u8 {
     alloc_bytes(size)
 }
 
-/// Free a buffer previously returned by [`alloc_pdf`]. `size` must be the
-/// exact size that was originally allocated.
+/// Free a buffer allocated by [`alloc_pdf`].
+///
+/// `size` must be the exact size that was originally allocated.
 ///
 /// # Safety
 /// `ptr` must be null (in which case this is a no-op) or a pointer
@@ -248,16 +222,18 @@ pub unsafe extern "C" fn free_pdf(ptr: *mut u8, size: usize) {
 }
 
 /// Allocate `size` bytes inside this module's own memory for the host to
-/// write a render-settings JSON blob into (see [`render_page`] for the
-/// shape), and return a pointer to it. `size` must be the exact byte
-/// length of the JSON text that will be written.
+/// write a render-settings JSON object, and return a pointer to it.
+///
+/// See [`render_page`] for the shape.  `size` must be the exact byte length
+/// of the JSON text that will be written.
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_render_settings(size: usize) -> *mut u8 {
     alloc_bytes(size)
 }
 
-/// Free a buffer previously returned by [`alloc_render_settings`]. `size`
-/// must be the exact size that was originally allocated.
+/// Free a buffer allocated by [`alloc_render_settings`].
+///
+/// `size` must be the exact size that was originally allocated.
 ///
 /// # Safety
 /// `ptr` must be null (in which case this is a no-op) or a pointer
@@ -270,15 +246,17 @@ pub unsafe extern "C" fn free_render_settings(ptr: *mut u8, size: usize) {
 }
 
 /// Allocate `size` bytes inside this module's own memory for the host to
-/// write an interpreter-settings JSON blob into (see [`render_page`] for
-/// the shape), and return a pointer to it. `size` must be the exact byte
+/// write an interpreter-settings JSON object.
+///
+/// See [`render_page`] for the shape.  `size` must be the exact byte
 /// length of the JSON text that will be written.
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_interpreter_settings(size: usize) -> *mut u8 {
     alloc_bytes(size)
 }
 
-/// Free a buffer previously returned by [`alloc_interpreter_settings`].
+/// Free a buffer allocated by [`alloc_interpreter_settings`].
+///
 /// `size` must be the exact size that was originally allocated.
 ///
 /// # Safety
@@ -296,8 +274,7 @@ fn layout_u32() -> Layout {
 }
 
 
-/// Allocate a zeroed, 4-byte, 4-byte-aligned `u32` cell, for use as one of
-/// [`render_page`]'s
+/// Allocate a zeroed, 4-byte, 4-byte-aligned `u32` cell.
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_u32() -> *mut u32 {
     // SAFETY: `layout_u32()`'s size (4) is non-zero, `alloc_zeroed`'s one
@@ -364,7 +341,7 @@ unsafe fn write_json<T: Serialize>(value: &T, len_out: *mut u32) -> *mut u8 {
     // In practice every `*Json` struct here always serializes to at least
     // `{}` (2 bytes) and nowhere near u32::MAX, but fail closed rather than
     // truncate the length silently on either extreme.
-    let Ok(len) = u32::try_from(json.len()) else {
+    let Ok(len_u32) = u32::try_from(json.len()) else {
         return std::ptr::null_mut();
     };
 
@@ -376,7 +353,7 @@ unsafe fn write_json<T: Serialize>(value: &T, len_out: *mut u32) -> *mut u8 {
     // SAFETY: `out` was just allocated with `json.len()` bytes.
     unsafe { std::ptr::copy_nonoverlapping(json.as_ptr(), out, json.len()) };
     // SAFETY: the caller upholds this function's safety contract.
-    unsafe { *len_out = len };
+    unsafe { *len_out = len_u32 };
 
     out
 }
@@ -407,10 +384,8 @@ fn resolve_page(pdf: &Pdf, page_number: u32) -> Option<&Page<'_>> {
         .and_then(|idx| pdf.pages().get(idx as usize))
 }
 
-/// Return one page's geometry as a UTF-8 JSON blob, without rendering it —
-/// orders of magnitude cheaper than [`render_page`] when all a caller needs
-/// is the page size, e.g. to compute a thumbnail's aspect ratio before
-/// deciding what to render at.
+/// Return one page's geometry as a JSON blob.  Useful for setting up
+/// `render_settings`.
 ///
 /// `page_number` is **1-based**, same as [`render_page`].
 ///
@@ -428,11 +403,11 @@ fn resolve_page(pdf: &Pdf, page_number: u32) -> Option<&Page<'_>> {
 ///   which already accounts for the page's `/Rotate` entry (swapped for a
 ///   90°/270° rotation).
 /// - `rotation`: integer, one of `0`, `90`, `180`, `270` — the page's
-///   `/Rotate` entry, normalized to that range.
+///   `/Rotate` entry.
 /// - `media_box`, `crop_box`: objects `{"x0": .., "y0": .., "x1": .., "y1": ..}`,
 ///   in unrotated PDF user-space points, straight from the page's
 ///   `/MediaBox`/`/CropBox` (inherited from an ancestor `/Pages` node and
-///   defaulted per spec, same as `hayro` does internally) — *not*
+///   defaulted per spec, same as `hayro` does internally).  Not
 ///   intersected or rotation-adjusted, unlike `width`/`height` above.
 ///
 /// # Safety
@@ -468,8 +443,9 @@ pub unsafe extern "C" fn page_info(
     unsafe { write_json(&json, len_out) }
 }
 
-/// Free a blob previously returned by [`page_info`]. `len` must be the
-/// exact value written to `len_out` for that call.
+/// Free a blob previously returned by [`page_info`].
+///
+/// Determine `len` from `len_out` from calling [`page_info`].
 ///
 /// # Safety
 /// `ptr` must be null (in which case this is a no-op) or a pointer
@@ -481,9 +457,8 @@ pub unsafe extern "C" fn free_page_info(ptr: *mut u8, len: u32) {
     unsafe { free_bytes(ptr, len as usize) };
 }
 
-/// Return document-level information as a UTF-8 JSON blob — the same
-/// "parse but don't render" cheapness as [`page_info`], scoped to the whole
-/// document rather than one page.
+/// Return document-level information as a JSON object, including page count,
+/// PDF version, document info, and timestamps.
 ///
 /// On success, writes the blob's byte length to `*len_out` and returns a
 /// pointer to it; free a non-null result with [`free_document_info`], same
@@ -494,11 +469,9 @@ pub unsafe extern "C" fn free_page_info(ptr: *mut u8, len: u32) {
 /// **JSON shape** — every field always present; the metadata fields
 /// (`title` through `producer`) and both dates are `null` when the PDF's
 /// document information dictionary doesn't set them:
-/// - `page_count`: integer — the document's page count
-///   (`pdf.pages().len()`).
+/// - `page_count`: integer
 /// - `version`: string, one of `"1.0"` through `"1.7"` or `"2.0"` — the
-///   effective PDF version (the document's trailer `/Version`, if set and
-///   valid, otherwise the `%PDF-x.y` header).
+///   effective PDF version.
 /// - `title`, `author`, `subject`, `keywords`, `creator`, `producer`:
 ///   strings or `null`, from the document information dictionary. PDF
 ///   allows these to be arbitrary byte strings; non-UTF-8 bytes are
@@ -540,8 +513,9 @@ pub unsafe extern "C" fn document_info(
     unsafe { write_json(&json, len_out) }
 }
 
-/// Free a blob previously returned by [`document_info`]. `len` must be the
-/// exact value written to `len_out` for that call.
+/// Free a blob previously returned by [`document_info`].
+///
+/// Determine `len` from `len_out` from calling [`document_info`].
 ///
 /// # Safety
 /// `ptr` must be null (in which case this is a no-op) or a pointer
@@ -570,32 +544,25 @@ pub unsafe extern "C" fn free_document_info(ptr: *mut u8, len: u32) {
 /// **Render-settings JSON** (mirrors `hayro::RenderSettings` field-for-field
 /// except `bg_color`), all fields optional:
 /// - `x_scale`, `y_scale`: numbers, `hayro`'s default is `1.0` for each.
-///   Unlike the old fixed-byte-layout version of this crate, an explicit
-///   `0.0` is honored literally (and, like any other zero scale, produces
-///   a zero-area — and thus failing — render) rather than being
-///   reinterpreted as "use the default".
 /// - `width`, `height`: integers in `0..=65535`. Absent means "auto".
+///    Sets the canvas size, does not effect scale.
 /// - `bg_color`: an object `{"r": .., "g": .., "b": .., "a": ..}`, each
-///   `0..=255`, **straight (non-premultiplied) alpha** — this matches Go's
-///   `image/color.NRGBA`, *not* `color.RGBA` (which is alpha-premultiplied).
-///   Absent means `hayro`'s actual default (i.e. `#00000000` — fully
-///   transparent black).
+///   `0..=255`.  Absent means `hayro`'s actual default (i.e. `#00000000` —
+///   fully transparent black).
 ///
 /// **Interpreter-settings JSON** (mirrors one field of
 /// `hayro_interpret::InterpreterSettings`), one optional field:
-/// - `render_annotations`: boolean. Absent means "use `hayro`'s default"
-///   (not hardcoded — read from `InterpreterSettings::default()` at call
-///   time, so this stays correct even if that default ever changes).
+/// - `render_annotations`: boolean. Absent means "use `hayro`'s default".
 ///
-/// `InterpreterSettings` also has `font_resolver`, `cmap_resolver`, and
-/// `warning_sink` fields, which are Rust closures and have no plain-bytes
-/// representation, so this bridge can't expose them — doing so would mean
-/// this module importing host-provided callback functions, which is a
-/// deliberate design decision of its own, not just another JSON field (see
+/// Hayro's version of `InterpreterSettings` also has `font_resolver`,
+/// `cmap_resolver`, and `warning_sink` fields, which are Rust closures and have
+/// no plain-bytes representation, so this bridge can't expose them — doing so
+/// would mean this module importing host-provided callback functions, which is
+/// a deliberate design decision of its own, not just another JSON field (see
 /// the crate README's "zero required host imports" goal). They're left at
-/// `hayro`'s defaults, which are still meaningful: this crate enables
-/// `hayro`'s `embed-fonts`/`embed-cmaps` features, so the standard 14 fonts
-/// and predefined cmaps resolve from embedded data even without a callback.
+/// `hayro`'s defaults, which are still meaningful: this crate enables `hayro`'s
+/// `embed-fonts`/`embed-cmaps` features, so the standard 14 fonts and
+/// predefined cmaps resolve from embedded data even without a callback.
 ///
 /// `width_out`/`height_out` must each point to a 4-byte `u32` cell
 /// (obtained from [`alloc_u32`]); on success this function writes the
@@ -687,9 +654,10 @@ pub unsafe extern "C" fn render_page(
     out
 }
 
-/// Free a pixel buffer previously returned by [`render_page`]. `width`/
-/// `height` must be the exact values [`render_page`] wrote into its
-/// `width_out`/`height_out` arguments for that call.
+/// Free a pixel buffer previously returned by [`render_page`].
+///
+/// `width`/`height` must be the exact values [`render_page`] wrote
+/// into its `width_out`/`height_out` arguments for that call.
 ///
 /// # Safety
 /// `ptr` must be null (in which case this is a no-op) or a pointer
