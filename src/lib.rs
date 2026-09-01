@@ -270,9 +270,8 @@ pub unsafe extern "C" fn free_interpreter_settings(ptr: *mut u8, size: usize) {
 }
 
 fn layout_u32() -> Layout {
-    return Layout::new::<u32>();
+    Layout::new::<u32>()
 }
-
 
 /// Allocate a zeroed, 4-byte, 4-byte-aligned `u32` cell.
 #[unsafe(no_mangle)]
@@ -545,7 +544,7 @@ pub unsafe extern "C" fn free_document_info(ptr: *mut u8, len: u32) {
 /// except `bg_color`), all fields optional:
 /// - `x_scale`, `y_scale`: numbers, `hayro`'s default is `1.0` for each.
 /// - `width`, `height`: integers in `0..=65535`. Absent means "auto".
-///    Sets the canvas size, does not effect scale.
+///   Sets the canvas size, does not effect scale.
 /// - `bg_color`: an object `{"r": .., "g": .., "b": .., "a": ..}`, each
 ///   `0..=255`.  Absent means `hayro`'s actual default (i.e. `#00000000` —
 ///   fully transparent black).
