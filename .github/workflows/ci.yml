@@ -16,5 +16,33 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
-      - run: cargo build --target wasm32-unknown-unknown --release
+      - run: cargo --locked test
+      - run: cargo --locked build --target wasm32-unknown-unknown --release
+
+  lint:
+    name: Rust quality checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo --locked fmt -- --check
+      - run: cargo --locked clippy --all-targets --all-features -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo --locked doc --no-deps
+
+  miri:
+    name: Miri (unsafe pointer-boundary checks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      # Everything except `render_page`'s own tests: those render through
+      # hayro's real CPU rasterizer, which uses architecture SIMD intrinsics
+      # (NEON/SSE/AVX) Miri can't interpret and fails on outright.
+      # slowly. This job covers this crate's alloc/free/pointer-boundary code.
+      - run: cargo --locked miri test -- --skip render_page
