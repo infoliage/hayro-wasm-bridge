@@ -47,6 +47,7 @@ use hayro::vello_cpu::color::AlphaColor;
 use hayro::{RenderCache, RenderSettings};
 use serde::{Deserialize, Serialize};
 use std::alloc::{Layout, alloc, alloc_zeroed, dealloc};
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests;
@@ -326,15 +327,10 @@ fn alloc_bytes(size: usize) -> *mut u8 {
 /// Serialize `value` to JSON, copy it into a freshly allocated buffer,
 /// write its byte length to `*len_out`, and return a pointer to it — the
 /// shared plumbing behind [`page_info`] and [`document_info`]'s "Rust
-/// allocates, host frees" output convention. Unlike [`render_page`]'s pixel
-/// buffer, there's no `width * height * 4` formula the host can recompute
-/// the size from on its own, so the length is carried explicitly instead —
-/// same reasoning [`free_render_settings`]/[`free_interpreter_settings`]
-/// already need it for the settings blobs.
+/// allocates, host frees" output convention.
 ///
 /// Returns a null pointer, with `*len_out` left untouched, if serialization
-/// fails (a bug in one of this module's `*Json` structs, not anything the
-/// caller did), the buffer would be too large for `len_out` to describe, or
+/// fails, the buffer would be too large for `len_out` to describe, or
 /// allocation fails.
 ///
 /// # Safety
@@ -418,8 +414,10 @@ fn resolve_page(pdf: &Pdf, page_number: u32) -> Option<&Page<'_>> {
 /// # Safety
 /// `pdf_ptr`/`pdf_len` must describe a live, initialized buffer of
 /// `pdf_len` bytes — e.g. one obtained from [`alloc_pdf`] and fully written
-/// by the host. `len_out` must point to a live, writable 4-byte `u32` cell
-/// (obtained from [`alloc_u32`]).
+/// by the host. The host must not write to or free that buffer while this
+/// call is running (from another thread, or from a host function this
+/// module calls). `len_out` must point to a live, writable 4-byte `u32`
+/// cell (obtained from [`alloc_u32`]).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn page_info(
     pdf_ptr: *const u8,
@@ -428,20 +426,21 @@ pub unsafe extern "C" fn page_info(
     len_out: *mut u32,
 ) -> *mut u8 {
     // SAFETY: the caller upholds this function's safety contract.
-    let Some(pdf) = (unsafe { parse_pdf(pdf_ptr, pdf_len) }) else {
-        return std::ptr::null_mut();
+    let json = unsafe {
+        with_pdf(pdf_ptr, pdf_len, |pdf| {
+            let page = resolve_page(pdf, page_number)?;
+            let (width, height) = page.render_dimensions();
+            Some(PageInfoJson {
+                width,
+                height,
+                rotation: rotation_degrees(page.rotation()),
+                media_box: page.media_box().into(),
+                crop_box: page.crop_box().into(),
+            })
+        })
     };
-    let Some(page) = resolve_page(&pdf, page_number) else {
+    let Some(json) = json else {
         return std::ptr::null_mut();
-    };
-
-    let (width, height) = page.render_dimensions();
-    let json = PageInfoJson {
-        width,
-        height,
-        rotation: rotation_degrees(page.rotation()),
-        media_box: page.media_box().into(),
-        crop_box: page.crop_box().into(),
     };
 
     // SAFETY: the caller upholds this function's safety contract.
@@ -487,8 +486,10 @@ pub unsafe extern "C" fn free_page_info(ptr: *mut u8, len: u32) {
 /// # Safety
 /// `pdf_ptr`/`pdf_len` must describe a live, initialized buffer of
 /// `pdf_len` bytes — e.g. one obtained from [`alloc_pdf`] and fully written
-/// by the host. `len_out` must point to a live, writable 4-byte `u32` cell
-/// (obtained from [`alloc_u32`]).
+/// by the host. The host must not write to or free that buffer while this
+/// call is running (from another thread, or from a host function this
+/// module calls). `len_out` must point to a live, writable 4-byte `u32`
+/// cell (obtained from [`alloc_u32`]).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn document_info(
     pdf_ptr: *const u8,
@@ -496,22 +497,25 @@ pub unsafe extern "C" fn document_info(
     len_out: *mut u32,
 ) -> *mut u8 {
     // SAFETY: the caller upholds this function's safety contract.
-    let Some(pdf) = (unsafe { parse_pdf(pdf_ptr, pdf_len) }) else {
-        return std::ptr::null_mut();
+    let json = unsafe {
+        with_pdf(pdf_ptr, pdf_len, |pdf| {
+            let metadata = pdf.metadata();
+            Some(DocumentInfoJson {
+                page_count: pdf.pages().len() as i32,
+                version: version_str(pdf.version()),
+                title: lossy_string(&metadata.title),
+                author: lossy_string(&metadata.author),
+                subject: lossy_string(&metadata.subject),
+                keywords: lossy_string(&metadata.keywords),
+                creator: lossy_string(&metadata.creator),
+                producer: lossy_string(&metadata.producer),
+                creation_date: metadata.creation_date.map(date_str),
+                modification_date: metadata.modification_date.map(date_str),
+            })
+        })
     };
-
-    let metadata = pdf.metadata();
-    let json = DocumentInfoJson {
-        page_count: pdf.pages().len() as i32,
-        version: version_str(pdf.version()),
-        title: lossy_string(&metadata.title),
-        author: lossy_string(&metadata.author),
-        subject: lossy_string(&metadata.subject),
-        keywords: lossy_string(&metadata.keywords),
-        creator: lossy_string(&metadata.creator),
-        producer: lossy_string(&metadata.producer),
-        creation_date: metadata.creation_date.map(date_str),
-        modification_date: metadata.modification_date.map(date_str),
+    let Some(json) = json else {
+        return std::ptr::null_mut();
     };
 
     // SAFETY: the caller upholds this function's safety contract.
@@ -586,9 +590,11 @@ pub unsafe extern "C" fn free_document_info(ptr: *mut u8, len: u32) {
 /// # Safety
 /// `pdf_ptr`/`pdf_len` must describe a live, initialized buffer of
 /// `pdf_len` bytes — e.g. one obtained from [`alloc_pdf`] and fully written
-/// by the host. `interpreter_settings_ptr`/`render_settings_ptr` must
-/// each be null (with a length of `0`) or point to a live, initialized
-/// buffer of the given length. `width_out`/`height_out` must each point to
+/// by the host. The host must not write to or free that buffer while this
+/// call is running (from another thread, or from a host function this
+/// module calls). `interpreter_settings_ptr`/
+/// `render_settings_ptr` must each be null (with a length of `0`) or point
+/// to a live, initialized buffer of the given length. `width_out`/`height_out` must each point to
 /// a live, writable 4-byte `u32` cell.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn render_page(
@@ -602,14 +608,6 @@ pub unsafe extern "C" fn render_page(
     width_out: *mut u32,
     height_out: *mut u32,
 ) -> *mut u8 {
-    // SAFETY: the caller upholds this function's safety contract.
-    let Some(pdf) = (unsafe { parse_pdf(pdf_ptr, pdf_len) }) else {
-        return std::ptr::null_mut();
-    };
-    let Some(page) = resolve_page(&pdf, page_number) else {
-        return std::ptr::null_mut();
-    };
-
     // SAFETY: the host is required to pass either a null pointer (with a
     // length of 0) or one pointing to a live, initialized buffer of the
     // given length.
@@ -625,8 +623,22 @@ pub unsafe extern "C" fn render_page(
         return std::ptr::null_mut();
     };
 
-    let cache = RenderCache::new();
-    let pixmap = hayro::render(page, &cache, &interpreter_settings, &render_settings);
+    // SAFETY: the caller upholds this function's safety contract.
+    let pixmap = unsafe {
+        with_pdf(pdf_ptr, pdf_len, |pdf| {
+            let page = resolve_page(pdf, page_number)?;
+            let cache = RenderCache::new();
+            Some(hayro::render(
+                page,
+                &cache,
+                &interpreter_settings,
+                &render_settings,
+            ))
+        })
+    };
+    let Some(pixmap) = pixmap else {
+        return std::ptr::null_mut();
+    };
 
     let width = pixmap.width() as u32;
     let height = pixmap.height() as u32;
@@ -752,16 +764,65 @@ unsafe fn read_interpreter_settings(
     })
 }
 
-/// Read `pdf_len` bytes starting at `pdf_ptr` and try to parse them as a PDF.
+/// A borrowed view of the host-owned PDF buffer passed to an exported call.
+///
+/// `hayro` wants to own its PDF bytes (`Pdf::new` takes an `Arc<T>` with
+/// `T: 'static`), but copying the host's buffer on every call would double
+/// the PDF's footprint in linear memory for the duration of that call. This
+/// wrapper lets `hayro` read the host's buffer in place instead. It's only
+/// sound because the `Pdf` holding it never outlives the exported call —
+/// see [`with_pdf`].
+struct HostPdfBytes {
+    ptr: *const u8,
+    len: usize,
+}
+
+impl AsRef<[u8]> for HostPdfBytes {
+    fn as_ref(&self) -> &[u8] {
+        if self.len == 0 {
+            // `from_raw_parts` requires a non-null pointer even for an empty
+            // slice, and the host passes null for an empty PDF.
+            return &[];
+        }
+
+        // SAFETY: `with_pdf`'s caller guarantees `ptr`/`len` describe a
+        // live, initialized buffer that stays unmodified until the `Pdf`
+        // holding this view is dropped.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+// SAFETY: this is semantically a `&[u8]`, which is `Send` and `Sync`: it only
+// ever reads from a buffer that stays unmodified for its whole lifetime.
+unsafe impl Send for HostPdfBytes {}
+// SAFETY: see `Send` above.
+unsafe impl Sync for HostPdfBytes {}
+
+/// Parse the `pdf_len` bytes starting at `pdf_ptr` as a PDF, reading them in
+/// place rather than copying them, and run `f` on it. Returns `None` if the
+/// bytes don't parse, and otherwise whatever `f` returns.
+///
+/// The `Pdf` reads the host's buffer even though `hayro` requires `'static`
+/// data, so it must not outlive this call. Since `f` only gets a `&Pdf`,
+/// the borrow checker rejects returning it, or anything borrowed from it
+/// (e.g. a `Page`), out of `f`. It can't stop `f` from explicitly cloning
+/// owned data such as `pdf.data()` out, so don't.
 ///
 /// # Safety
 /// `pdf_ptr`/`pdf_len` must describe a live, initialized buffer of
 /// `pdf_len` bytes — e.g. one obtained from [`alloc_pdf`] and fully written
-/// by the host.
-unsafe fn parse_pdf(pdf_ptr: *const u8, pdf_len: usize) -> Option<Pdf> {
-    // SAFETY: the caller upholds this function's safety contract. We copy
-    // the bytes out immediately rather than holding onto the borrow.
-    let bytes = unsafe { std::slice::from_raw_parts(pdf_ptr, pdf_len) }.to_vec();
+/// by the host — or be null with a `pdf_len` of `0`. The buffer must stay
+/// live and unmodified until this returns.
+unsafe fn with_pdf<R>(
+    pdf_ptr: *const u8,
+    pdf_len: usize,
+    f: impl FnOnce(&Pdf) -> Option<R>,
+) -> Option<R> {
+    let bytes = HostPdfBytes {
+        ptr: pdf_ptr,
+        len: pdf_len,
+    };
+    let pdf = Pdf::new(Arc::new(bytes)).ok()?;
 
-    Pdf::new(bytes).ok()
+    f(&pdf)
 }
