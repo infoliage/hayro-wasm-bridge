@@ -703,6 +703,15 @@ fn page_info_garbage_pdf_returns_null() {
 }
 
 #[test]
+fn page_info_empty_pdf_returns_null() {
+    // What the host passes for a zero-length PDF, since `alloc_pdf(0)` is
+    // null.
+    let mut len_out = 0u32;
+    let ptr = unsafe { page_info(std::ptr::null(), 0, 1, &mut len_out) };
+    assert!(ptr.is_null());
+}
+
+#[test]
 fn free_page_info_null_is_noop() {
     unsafe { free_page_info(std::ptr::null_mut(), 0) };
 }
