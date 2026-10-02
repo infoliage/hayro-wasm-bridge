@@ -15,11 +15,10 @@ license = "Apache-2.0 OR MIT"
 crate-type = ["cdylib"]
 
 [dependencies]
-bytemuck = "1.25.2"
 # `embed-fonts`/`embed-cmaps` currently happen to be in hayro's own default
 # feature set too, but we list them explicitly so text rendering (standard
 # 14 fonts + predefined cmaps) keeps working here even if that default ever
 # changes upstream.
-hayro = { version = "0.7.1", features = ["embed-fonts", "embed-cmaps"] }
+hayro = { version = "0.8.0", features = ["embed-fonts", "embed-cmaps"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

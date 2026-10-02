@@ -16,35 +16,42 @@
 //! kind of thing crossing the boundary ([`alloc_pdf`]/[`free_pdf`],
 //! [`alloc_render_settings`]/[`free_render_settings`], and so on).
 //!
-//! The settings blobs are UTF-8 JSON text, one object each, matching
-//! [`RenderSettings`]/`InterpreterSettings`'s field names. Every field is
-//! optional; an absent field means "use `hayro`'s default for it."
+//! The settings blobs are UTF-8 JSON text, one object each — see
+//! [`render_page`] for the shape of each. Every field is optional; an
+//! absent field means "use the default for it."
 //!
 //! Calling convention, from the host's side:
 //! 1. Call [`alloc_pdf`] to reserve space for the PDF's bytes, and write
 //!    them into the module's memory at the returned offset.
 //! 2. Call [`document_info`] unless you know the exact document structure
 //!    in advance.
-//! 2. Optionally call [`alloc_render_settings`] and/or
-//!    [`alloc_interpreter_settings`] and write a JSON object into the
-//!    result, if you want anything other than `hayro`'s defaults — see
-//!    [`render_page`] for the shape of each. Omit whichever fields you
-//!    don't care about; pass a null pointer (and a length of `0`) for
-//!    either blob to fully accept `hayro`'s defaults.
+//! 2. Optionally call [`alloc_interpreter_settings`],
+//!    [`alloc_render_settings`] and/or [`alloc_pixmap_settings`] and write
+//!    a JSON object into the result, if you want anything other than the
+//!    defaults — see [`render_page`] for the shape of each. Omit whichever
+//!    fields you don't care about; pass a null pointer (and a length of
+//!    `0`) for any blob to fully accept its defaults.
 //! 3. Call [`alloc_u32`] twice, for [`render_page`]'s `width_out`/
 //!    `height_out` arguments.
 //! 4. Call [`render_page`]. It returns a pointer to `width * height * 4`
 //!    bytes of RGBA8 pixel data or `0` = null on failure.
-//! 5. Free everything you allocated: [`free_pdf`], [`free_render_settings`]/
-//!    [`free_interpreter_settings`] if you used them, [`free_u32`] (for
+//! 5. Free everything you allocated: [`free_pdf`],
+//!    [`free_interpreter_settings`]/[`free_render_settings`]/
+//!    [`free_pixmap_settings`] if you used them, [`free_u32`] (for
 //!    each of the two output cells), and [`free_pixels`] for the result.
 
 use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::util::TransformExt;
 use hayro::hayro_syntax::object::{DateTime, Rect};
 use hayro::hayro_syntax::page::{Page, Rotation};
 use hayro::hayro_syntax::{Pdf, PdfVersion};
-use hayro::vello_cpu::color::AlphaColor;
+use hayro::kurbo::Affine;
+use hayro::vello_cpu::color::palette::css::TRANSPARENT;
+use hayro::vello_cpu::color::{AlphaColor, Srgb};
+use hayro::vello_cpu::peniko::ImageAlphaType;
+use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit};
 use hayro::{RenderCache, RenderSettings};
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::alloc::{Layout, alloc, alloc_zeroed, dealloc};
 use std::sync::Arc;
@@ -54,23 +61,49 @@ mod tests;
 
 /// The JSON shape of a render-settings blob — see [`render_page`]'s docs,
 /// or `schema/render-settings.schema.json`, for the authoritative
-/// description of each field.
-///
-/// Every field is a real `Option<T>`: absent means "use `hayro`'s
-/// default", the same as it always meant. Unlike the old fixed-byte-layout
-/// version of this crate, there's no sentinel value doing double duty
-/// anymore — an explicit `"x_scale": 0.0`, for example, is now honored
-/// literally (and, as before, produces a zero-area — and thus failing —
-/// render), rather than being silently reinterpreted as "use the default
-/// instead".
+/// description.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RenderSettingsJson {
-    x_scale: Option<f32>,
-    y_scale: Option<f32>,
+    force_image_interpolation: Option<bool>,
+}
+
+/// The JSON shape of a pixmap-settings blob — see [`render_page`]'s docs,
+/// or `schema/pixmap-settings.schema.json`, for the authoritative
+/// description of each field.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PixmapSettingsJson {
     width: Option<u16>,
     height: Option<u16>,
+    transform: Option<[f64; 6]>,
     bg_color: Option<RgbaJson>,
+}
+
+/// The canvas [`render_page`] draws a page onto: the decoded form of a
+/// pixmap-settings blob.
+struct PixmapSettings {
+    /// The canvas size in pixels, or `None` to use the page's own
+    /// dimensions.
+    width: Option<u16>,
+    height: Option<u16>,
+    /// Applied on top of the page's own initial transform, so it maps
+    /// upright page space (points, origin top-left, y down) to canvas
+    /// pixels.
+    transform: Affine,
+    /// What the canvas is cleared to before the page is drawn.
+    bg_color: AlphaColor<Srgb>,
+}
+
+impl Default for PixmapSettings {
+    fn default() -> Self {
+        Self {
+            width: None,
+            height: None,
+            transform: Affine::IDENTITY,
+            bg_color: TRANSPARENT,
+        }
+    }
 }
 
 /// Straight (non-premultiplied) alpha, R/G/B/A, matching Go's
@@ -253,6 +286,30 @@ pub unsafe extern "C" fn free_render_settings(ptr: *mut u8, size: usize) {
 }
 
 /// Allocate `size` bytes inside this module's own memory for the host to
+/// write a pixmap-settings JSON object, and return a pointer to it.
+///
+/// See [`render_page`] for the shape.  `size` must be the exact byte length
+/// of the JSON text that will be written.
+#[unsafe(no_mangle)]
+pub extern "C" fn alloc_pixmap_settings(size: usize) -> *mut u8 {
+    alloc_bytes(size)
+}
+
+/// Free a buffer allocated by [`alloc_pixmap_settings`].
+///
+/// `size` must be the exact size that was originally allocated.
+///
+/// # Safety
+/// `ptr` must be null (in which case this is a no-op) or a pointer
+/// previously returned by [`alloc_pixmap_settings`] that hasn't already
+/// been freed, paired with the exact `size` it was allocated with.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_pixmap_settings(ptr: *mut u8, size: usize) {
+    // SAFETY: the caller upholds this function's safety contract.
+    unsafe { free_bytes(ptr, size) };
+}
+
+/// Allocate `size` bytes inside this module's own memory for the host to
 /// write an interpreter-settings JSON object.
 ///
 /// See [`render_page`] for the shape.  `size` must be the exact byte
@@ -386,7 +443,7 @@ fn resolve_page(pdf: &Pdf, page_number: u32) -> Option<&Page<'_>> {
 }
 
 /// Return one page's geometry as a JSON blob.  Useful for setting up
-/// `render_settings`.
+/// `pixmap_settings`.
 ///
 /// `page_number` is **1-based**, same as [`render_page`].
 ///
@@ -398,11 +455,11 @@ fn resolve_page(pdf: &Pdf, page_number: u32) -> Option<&Page<'_>> {
 /// serialization/allocation failure.
 ///
 /// **JSON shape** — every field always present:
-/// - `width`, `height`: numbers, in points. The pixel size [`render_page`]
-///   would produce at `x_scale`/`y_scale` of `1.0` and no explicit
-///   `width`/`height` override — i.e. `hayro`'s `Page::render_dimensions()`,
-///   which already accounts for the page's `/Rotate` entry (swapped for a
-///   90°/270° rotation).
+/// - `width`, `height`: numbers, in points. The page's size as displayed —
+///   i.e. `hayro`'s `Page::render_dimensions()`, which already accounts for
+///   the page's `/Rotate` entry (swapped for a 90°/270° rotation). With no
+///   pixmap settings, [`render_page`] produces an image of this size, one
+///   pixel per point (truncated to whole pixels).
 /// - `rotation`: integer, one of `0`, `90`, `180`, `270` — the page's
 ///   `/Rotate` entry.
 /// - `media_box`, `crop_box`: objects `{"x0": .., "y0": .., "x1": .., "y1": ..}`,
@@ -540,24 +597,40 @@ pub unsafe extern "C" fn free_document_info(ptr: *mut u8, len: u32) {
 ///
 /// `page_number` is **1-based**.
 ///
-/// `interpreter_settings_ptr`/`interpreter_settings_len` and
-/// `render_settings_ptr`/`render_settings_len` each independently select a
-/// `hayro` settings struct to use for this render, as UTF-8 JSON text. Pass
-/// a null pointer (with a length of `0`) for either to use all of
-/// `hayro`'s defaults for that struct; otherwise every field in the JSON
-/// object is itself optional, and an absent field means "use the default
-/// for just this field". Malformed JSON, or an object with an unrecognized
-/// field name, is treated as a failure the same as any other — see the
-/// return value below.
+/// `interpreter_settings_ptr`/`interpreter_settings_len`,
+/// `render_settings_ptr`/`render_settings_len` and
+/// `pixmap_settings_ptr`/`pixmap_settings_len` each independently select a
+/// group of settings to use for this render, as UTF-8 JSON text. Pass a
+/// null pointer (with a length of `0`) for any of them to use all of that
+/// group's defaults; otherwise every field in the JSON object is itself
+/// optional, and an absent field means "use the default for just this
+/// field". Malformed JSON, or an object with an unrecognized field name, is
+/// treated as a failure the same as any other — see the return value below.
 ///
-/// **Render-settings JSON** (mirrors `hayro::RenderSettings` field-for-field
-/// except `bg_color`), all fields optional:
-/// - `x_scale`, `y_scale`: numbers, `hayro`'s default is `1.0` for each.
-/// - `width`, `height`: integers in `0..=65535`. Absent means "auto".
-///   Sets the canvas size, does not effect scale.
+/// **Render-settings JSON** (mirrors `hayro::RenderSettings`), one optional
+/// field:
+/// - `force_image_interpolation`: boolean. `true` draws every image with
+///   bilinear interpolation, whatever the PDF asks for. Absent means "use
+///   `hayro`'s default" (`false`).
+///
+/// **Pixmap-settings JSON** (the output canvas — what `hayro` splits between
+/// `PixmapSettings` and the `ctx`/`transform` arguments of
+/// `hayro::render_into`), all fields optional:
+/// - `width`, `height`: integers in `0..=65535`, the canvas size in pixels.
+///   Absent means the page's own size ([`page_info`]'s `width`/`height`,
+///   truncated to whole pixels), which is only allowed when `transform` is
+///   absent too: a transform has no canvas size that is obviously right for
+///   it, so both must be given alongside one.
+/// - `transform`: an array of six numbers `[a, b, c, d, e, f]`, the affine
+///   transform `x' = a*x + c*y + e`, `y' = b*x + d*y + f` (the same
+///   coefficient order as `kurbo::Affine`). It maps upright page space —
+///   points, origin at the page's top-left corner, y pointing down, with
+///   the page's `/Rotate` entry and crop box already applied — to canvas
+///   pixels. Absent means the identity, i.e. one pixel per point. Whatever
+///   the transform, nothing outside the page's crop box is drawn.
 /// - `bg_color`: an object `{"r": .., "g": .., "b": .., "a": ..}`, each
-///   `0..=255`.  Absent means `hayro`'s actual default (i.e. `#00000000` —
-///   fully transparent black).
+///   `0..=255`, which the canvas is cleared to before the page is drawn.
+///   Absent means `#00000000` — fully transparent black.
 ///
 /// **Interpreter-settings JSON** (mirrors one field of
 /// `hayro_interpret::InterpreterSettings`), one optional field:
@@ -581,7 +654,7 @@ pub unsafe extern "C" fn free_document_info(ptr: *mut u8, len: u32) {
 /// Returns a pointer to `width * height * 4` bytes of RGBA8 pixel data
 /// (non-premultiplied, one byte per channel), or a null pointer (`0`) on
 /// failure — an unparseable PDF, an out-of-range `page_number`, malformed
-/// settings JSON, or a render that came out zero-area.
+/// settings JSON, or a zero-area canvas.
 ///
 /// The caller must eventually free a non-null result with [`free_pixels`],
 /// passing the same `width`/`height` this function wrote to `width_out`/
@@ -592,8 +665,8 @@ pub unsafe extern "C" fn free_document_info(ptr: *mut u8, len: u32) {
 /// `pdf_len` bytes — e.g. one obtained from [`alloc_pdf`] and fully written
 /// by the host. The host must not write to or free that buffer while this
 /// call is running (from another thread, or from a host function this
-/// module calls). `interpreter_settings_ptr`/
-/// `render_settings_ptr` must each be null (with a length of `0`) or point
+/// module calls). `interpreter_settings_ptr`/`render_settings_ptr`/
+/// `pixmap_settings_ptr` must each be null (with a length of `0`) or point
 /// to a live, initialized buffer of the given length. `width_out`/`height_out` must each point to
 /// a live, writable 4-byte `u32` cell.
 #[unsafe(no_mangle)]
@@ -605,6 +678,8 @@ pub unsafe extern "C" fn render_page(
     interpreter_settings_len: usize,
     render_settings_ptr: *const u8,
     render_settings_len: usize,
+    pixmap_settings_ptr: *const u8,
+    pixmap_settings_len: usize,
     width_out: *mut u32,
     height_out: *mut u32,
 ) -> *mut u8 {
@@ -622,18 +697,50 @@ pub unsafe extern "C" fn render_page(
     else {
         return std::ptr::null_mut();
     };
+    // SAFETY: same requirement as above.
+    let Ok(pixmap_settings) =
+        (unsafe { read_pixmap_settings(pixmap_settings_ptr, pixmap_settings_len) })
+    else {
+        return std::ptr::null_mut();
+    };
 
     // SAFETY: the caller upholds this function's safety contract.
     let pixmap = unsafe {
         with_pdf(pdf_ptr, pdf_len, |pdf| {
             let page = resolve_page(pdf, page_number)?;
+            let (page_width, page_height) = page.render_dimensions();
+            let width = pixmap_settings.width.unwrap_or(page_width as u16);
+            let height = pixmap_settings.height.unwrap_or(page_height as u16);
+            // A zero-area canvas isn't a useful result, and `alloc` below
+            // requires a non-zero size, so it's treated the same as any
+            // other failure.
+            if width == 0 || height == 0 {
+                return None;
+            }
+
+            let mut ctx = RenderContext::new(width, height);
+            let transform = pixmap_settings.transform * page.initial_transform(true).to_kurbo();
             let cache = RenderCache::new();
-            Some(hayro::render(
+            hayro::render_into(
                 page,
                 &cache,
                 &interpreter_settings,
                 &render_settings,
-            ))
+                &mut ctx,
+                transform,
+            );
+            ctx.flush();
+
+            let mut pixmap = Pixmap::new(width, height);
+            ctx.render_with(
+                &mut pixmap,
+                &mut Resources::default(),
+                RasterizerSettings {
+                    target_init: TargetInit::Clear(pixmap_settings.bg_color),
+                    ..Default::default()
+                },
+            );
+            Some(pixmap)
         })
     };
     let Some(pixmap) = pixmap else {
@@ -642,17 +749,10 @@ pub unsafe extern "C" fn render_page(
 
     let width = pixmap.width() as u32;
     let height = pixmap.height() as u32;
-    let rgba: Vec<u8> = bytemuck::cast_vec(pixmap.take_unpremultiplied());
+    let rgba = pixmap.take_rgba8(ImageAlphaType::Alpha);
 
-    // `alloc` requires a non-zero size, and a zero-area render (e.g. an
-    // explicit 0 scale) isn't a useful result anyway, so it's treated the
-    // same as any other failure: null, with the output cells left
-    // untouched.
-    if rgba.is_empty() {
-        return std::ptr::null_mut();
-    }
-
-    // SAFETY: `rgba.len()` is non-zero, just checked above.
+    // SAFETY: `rgba.len()` is non-zero, since a zero-area canvas was
+    // rejected before rendering.
     let out = unsafe { alloc(layout_for(rgba.len())) };
     if out.is_null() {
         return std::ptr::null_mut();
@@ -702,9 +802,7 @@ fn pixel_byte_len(width: u32, height: u32) -> Option<usize> {
 /// Read a [`RenderSettings`] from the JSON object at `ptr`/`len`, or
 /// `RenderSettings::default()` if `ptr` is null. `Err` means the bytes at
 /// `ptr`/`len` were not valid JSON matching [`RenderSettingsJson`]'s shape
-/// — the caller should treat this as a hard failure, not silently fall
-/// back to defaults, since it most likely means the host and this module
-/// have drifted out of sync about the settings' shape.
+/// — treated as a hard failure, same as [`read_pixmap_settings`].
 ///
 /// # Safety
 /// If non-null, `ptr` must point to a live, initialized buffer of exactly
@@ -723,10 +821,49 @@ unsafe fn read_render_settings(
 
     let defaults = RenderSettings::default();
     Ok(RenderSettings {
-        x_scale: json.x_scale.unwrap_or(defaults.x_scale),
-        y_scale: json.y_scale.unwrap_or(defaults.y_scale),
+        force_image_interpolation: json
+            .force_image_interpolation
+            .unwrap_or(defaults.force_image_interpolation),
+    })
+}
+
+/// Read a [`PixmapSettings`] from the JSON object at `ptr`/`len`, or
+/// `PixmapSettings::default()` if `ptr` is null. `Err` means the bytes at
+/// `ptr`/`len` were not valid JSON matching [`PixmapSettingsJson`]'s shape
+/// — or that it set `transform` without both `width` and `height`. The
+/// caller should treat this as a hard failure, not silently fall back to
+/// defaults, since it most likely means the host and this module have
+/// drifted out of sync about the settings' shape.
+///
+/// # Safety
+/// If non-null, `ptr` must point to a live, initialized buffer of exactly
+/// `len` bytes — see [`render_page`]'s docs for the JSON shape.
+unsafe fn read_pixmap_settings(
+    ptr: *const u8,
+    len: usize,
+) -> Result<PixmapSettings, serde_json::Error> {
+    if ptr.is_null() {
+        return Ok(PixmapSettings::default());
+    }
+
+    // SAFETY: the caller upholds this function's safety contract.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let json: PixmapSettingsJson = serde_json::from_slice(bytes)?;
+
+    if json.transform.is_some() && (json.width.is_none() || json.height.is_none()) {
+        return Err(serde_json::Error::custom(
+            "`transform` requires both `width` and `height`",
+        ));
+    }
+
+    let defaults = PixmapSettings::default();
+    Ok(PixmapSettings {
         width: json.width,
         height: json.height,
+        transform: json
+            .transform
+            .map(Affine::new)
+            .unwrap_or(defaults.transform),
         bg_color: json
             .bg_color
             .map(|RgbaJson { r, g, b, a }| AlphaColor::from_rgba8(r, g, b, a))
@@ -738,7 +875,7 @@ unsafe fn read_render_settings(
 /// JSON object at `ptr`/`len`, or `InterpreterSettings::default()` if `ptr`
 /// is null. `Err` means the bytes at `ptr`/`len` were not valid JSON
 /// matching [`InterpreterSettingsJson`]'s shape — treated as a hard
-/// failure, same as [`read_render_settings`].
+/// failure, same as [`read_pixmap_settings`].
 ///
 /// # Safety
 /// If non-null, `ptr` must point to a live, initialized buffer of exactly
