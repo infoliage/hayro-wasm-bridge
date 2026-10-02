@@ -90,41 +90,37 @@ startxref
 0
 %%EOF";
 
-// ---- Render-settings blob decoding -----------------------------------------
+// ---- Pixmap-settings blob decoding -----------------------------------------
 
 #[test]
-fn render_settings_null_ptr_is_default() {
-    let settings = unsafe { read_render_settings(std::ptr::null(), 0) }.unwrap();
-    let defaults = RenderSettings::default();
-    assert_eq!(settings.x_scale, defaults.x_scale);
-    assert_eq!(settings.y_scale, defaults.y_scale);
-    assert_eq!(settings.width, defaults.width);
-    assert_eq!(settings.height, defaults.height);
-    assert_eq!(settings.bg_color.to_rgba8(), defaults.bg_color.to_rgba8());
+fn pixmap_settings_null_ptr_is_default() {
+    let settings = unsafe { read_pixmap_settings(std::ptr::null(), 0) }.unwrap();
+    assert_eq!(settings.width, None);
+    assert_eq!(settings.height, None);
+    assert_eq!(settings.transform, Affine::IDENTITY);
+    assert_eq!(settings.bg_color.to_rgba8(), TRANSPARENT.to_rgba8());
 }
 
 #[test]
-fn render_settings_empty_object_is_default() {
-    // `{}` is the JSON equivalent of the old zeroed-blob convention: every
-    // field absent, so every field falls back to `hayro`'s default.
+fn pixmap_settings_empty_object_is_default() {
     let json = b"{}";
-    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
-    let defaults = RenderSettings::default();
-    assert_eq!(settings.x_scale, defaults.x_scale);
-    assert_eq!(settings.y_scale, defaults.y_scale);
-    assert_eq!(settings.width, defaults.width);
-    assert_eq!(settings.height, defaults.height);
-    assert_eq!(settings.bg_color.to_rgba8(), defaults.bg_color.to_rgba8());
+    let settings = unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.unwrap();
+    assert_eq!(settings.width, None);
+    assert_eq!(settings.height, None);
+    assert_eq!(settings.transform, Affine::IDENTITY);
+    assert_eq!(settings.bg_color.to_rgba8(), TRANSPARENT.to_rgba8());
 }
 
 #[test]
-fn render_settings_decodes_explicit_values() {
-    let json = br#"{"x_scale":2.5,"y_scale":3.5,"width":800,"height":600,"bg_color":{"r":10,"g":20,"b":30,"a":128}}"#;
-    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
-    assert_eq!(settings.x_scale, 2.5);
-    assert_eq!(settings.y_scale, 3.5);
+fn pixmap_settings_decodes_explicit_values() {
+    let json = br#"{"width":800,"height":600,"transform":[2.5,0.5,-0.5,3.5,10,20],"bg_color":{"r":10,"g":20,"b":30,"a":128}}"#;
+    let settings = unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.unwrap();
     assert_eq!(settings.width, Some(800));
     assert_eq!(settings.height, Some(600));
+    assert_eq!(
+        settings.transform.as_coeffs(),
+        [2.5, 0.5, -0.5, 3.5, 10.0, 20.0]
+    );
     assert_eq!(
         settings.bg_color.to_rgba8(),
         AlphaColor::from_rgba8(10, 20, 30, 128).to_rgba8()
@@ -132,64 +128,25 @@ fn render_settings_decodes_explicit_values() {
 }
 
 #[test]
-fn render_settings_partial_object_only_overrides_what_is_set() {
+fn pixmap_settings_partial_object_only_overrides_what_is_set() {
     let json = br#"{"width":800}"#;
-    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
-    let defaults = RenderSettings::default();
+    let settings = unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.unwrap();
     assert_eq!(settings.width, Some(800));
-    assert_eq!(settings.height, defaults.height);
-    assert_eq!(settings.x_scale, defaults.x_scale);
+    assert_eq!(settings.height, None);
+    assert_eq!(settings.transform, Affine::IDENTITY);
 }
 
 #[test]
-fn render_settings_explicit_zero_scale_is_not_default() {
-    // The whole point of moving to real JSON `option`s instead of the old
-    // "0 means default" byte convention: an explicit 0.0 is honored
-    // literally now, not silently reinterpreted.
-    let json = br#"{"x_scale":0.0}"#;
-    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
-    assert_eq!(settings.x_scale, 0.0);
-}
-
-#[test]
-fn render_settings_malformed_json_is_an_error() {
-    let json = b"not json";
-    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
-}
-
-#[test]
-fn render_settings_unknown_field_is_an_error() {
-    // Catches typos/drift between the host and this module's field names,
-    // rather than silently ignoring an unrecognized field.
-    let json = br#"{"xscale":2.5}"#;
-    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
-}
-
-#[test]
-fn render_settings_wrong_field_type_is_an_error() {
-    let json = br#"{"x_scale":"not a number"}"#;
-    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
-}
-
-#[test]
-fn render_settings_out_of_range_number_is_an_error() {
-    // `width` is `u16`; 70000 overflows it.
-    let json = br#"{"width":70000}"#;
-    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
-
-    // `bg_color.r` is `u8`; 300 overflows it.
-    let json = br#"{"bg_color":{"r":300,"g":0,"b":0,"a":0}}"#;
-    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
-}
-
-#[test]
-fn render_settings_wrong_top_level_shape_is_an_error() {
-    // Valid JSON, but not an object - an array, a bare string, a bare
-    // number, and `null` should all be rejected the same as syntactically
-    // invalid JSON, not e.g. silently treated as "no fields set".
-    for json in [b"[1,2,3]".as_slice(), b"\"oops\"", b"42", b"null"] {
+fn pixmap_settings_transform_without_canvas_size_is_an_error() {
+    // A transform has no canvas size that is obviously right for it, so
+    // the host has to say what it wants rather than get the page's own.
+    for json in [
+        br#"{"transform":[2,0,0,2,0,0]}"#.as_slice(),
+        br#"{"transform":[2,0,0,2,0,0],"width":400}"#,
+        br#"{"transform":[2,0,0,2,0,0],"height":200}"#,
+    ] {
         assert!(
-            unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err(),
+            unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.is_err(),
             "expected {:?} to be rejected",
             std::str::from_utf8(json).unwrap()
         );
@@ -197,13 +154,72 @@ fn render_settings_wrong_top_level_shape_is_an_error() {
 }
 
 #[test]
-fn render_settings_empty_body_with_nonnull_ptr_is_an_error() {
+fn pixmap_settings_transform_with_wrong_length_is_an_error() {
+    for json in [
+        br#"{"width":1,"height":1,"transform":[1,0,0,1,0]}"#.as_slice(),
+        br#"{"width":1,"height":1,"transform":[1,0,0,1,0,0,0]}"#,
+    ] {
+        assert!(
+            unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
+}
+
+#[test]
+fn pixmap_settings_malformed_json_is_an_error() {
+    let json = b"not json";
+    assert!(unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn pixmap_settings_unknown_field_is_an_error() {
+    // Catches typos/drift between the host and this module's field names,
+    // rather than silently ignoring an unrecognized field.
+    let json = br#"{"widht":800}"#;
+    assert!(unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn pixmap_settings_wrong_field_type_is_an_error() {
+    let json = br#"{"width":"not a number"}"#;
+    assert!(unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn pixmap_settings_out_of_range_number_is_an_error() {
+    // `width` is `u16`; 70000 overflows it.
+    let json = br#"{"width":70000}"#;
+    assert!(unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.is_err());
+
+    // `bg_color.r` is `u8`; 300 overflows it.
+    let json = br#"{"bg_color":{"r":300,"g":0,"b":0,"a":0}}"#;
+    assert!(unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn pixmap_settings_wrong_top_level_shape_is_an_error() {
+    // Valid JSON, but not an object - an array, a bare string, a bare
+    // number, and `null` should all be rejected the same as syntactically
+    // invalid JSON, not e.g. silently treated as "no fields set".
+    for json in [b"[1,2,3]".as_slice(), b"\"oops\"", b"42", b"null"] {
+        assert!(
+            unsafe { read_pixmap_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
+}
+
+#[test]
+fn pixmap_settings_empty_body_with_nonnull_ptr_is_an_error() {
     // Distinct from a null pointer (which means "use every default"): a
     // non-null pointer with a zero-length, empty JSON body isn't valid
     // JSON at all, so it must be rejected rather than treated the same as
     // "no settings supplied".
     let empty: &[u8] = &[];
-    assert!(unsafe { read_render_settings(empty.as_ptr(), 0) }.is_err());
+    assert!(unsafe { read_pixmap_settings(empty.as_ptr(), 0) }.is_err());
 }
 
 // ---- Interpreter-settings blob decoding ------------------------------------
@@ -267,9 +283,9 @@ fn interpreter_settings_wrong_top_level_shape_is_an_error() {
     // `InterpreterSettingsJson` has exactly one field, so a single-element
     // array is legitimately equivalent to `{"render_annotations": true}`
     // as far as serde is concerned - not a bug, just worth knowing about
-    // for a one-field settings struct specifically. `RenderSettingsJson`
-    // has five fields, so this doesn't come up for it (see the
-    // `render_settings` equivalent of this test).
+    // for a one-field settings struct specifically. `PixmapSettingsJson`
+    // has four fields, so this doesn't come up for it (see the
+    // `pixmap_settings` equivalent of this test).
     for json in [b"[true, false]".as_slice(), b"\"oops\"", b"1", b"null"] {
         assert!(
             unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.is_err(),
@@ -283,6 +299,80 @@ fn interpreter_settings_wrong_top_level_shape_is_an_error() {
 fn interpreter_settings_empty_body_with_nonnull_ptr_is_an_error() {
     let empty: &[u8] = &[];
     assert!(unsafe { read_interpreter_settings(empty.as_ptr(), 0) }.is_err());
+}
+
+// ---- Render-settings blob decoding -----------------------------------------
+
+#[test]
+fn render_settings_null_ptr_is_default() {
+    let settings = unsafe { read_render_settings(std::ptr::null(), 0) }.unwrap();
+    assert_eq!(
+        settings.force_image_interpolation,
+        RenderSettings::default().force_image_interpolation
+    );
+}
+
+#[test]
+fn render_settings_empty_object_is_default() {
+    let json = b"{}";
+    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
+    assert_eq!(
+        settings.force_image_interpolation,
+        RenderSettings::default().force_image_interpolation
+    );
+}
+
+#[test]
+fn render_settings_true_forces_image_interpolation() {
+    let json = br#"{"force_image_interpolation":true}"#;
+    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
+    assert!(settings.force_image_interpolation);
+}
+
+#[test]
+fn render_settings_false_does_not_force_image_interpolation() {
+    let json = br#"{"force_image_interpolation":false}"#;
+    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
+    assert!(!settings.force_image_interpolation);
+}
+
+#[test]
+fn render_settings_malformed_json_is_an_error() {
+    let json = b"{";
+    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn render_settings_wrong_field_type_is_an_error() {
+    let json = br#"{"force_image_interpolation":"yes"}"#;
+    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn render_settings_unknown_field_is_an_error() {
+    // Pixmap-settings fields belong in their own blob, not this one.
+    let json = br#"{"width":800}"#;
+    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
+}
+
+#[test]
+fn render_settings_wrong_top_level_shape_is_an_error() {
+    // `[true]` is not in this list for the same reason as in the
+    // `interpreter_settings` equivalent of this test: `RenderSettingsJson`
+    // has exactly one field too.
+    for json in [b"[true, false]".as_slice(), b"\"oops\"", b"1", b"null"] {
+        assert!(
+            unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
+}
+
+#[test]
+fn render_settings_empty_body_with_nonnull_ptr_is_an_error() {
+    let empty: &[u8] = &[];
+    assert!(unsafe { read_render_settings(empty.as_ptr(), 0) }.is_err());
 }
 
 // ---- Alloc/free pairs -------------------------------------------------------
@@ -321,6 +411,24 @@ fn alloc_render_settings_zero_size_returns_null() {
 fn free_render_settings_null_is_noop() {
     unsafe { free_render_settings(std::ptr::null_mut(), 0) };
     unsafe { free_render_settings(std::ptr::null_mut(), 2) };
+}
+
+#[test]
+fn alloc_pixmap_settings_round_trip() {
+    let ptr = alloc_pixmap_settings(2);
+    assert!(!ptr.is_null());
+    unsafe { free_pixmap_settings(ptr, 2) };
+}
+
+#[test]
+fn alloc_pixmap_settings_zero_size_returns_null() {
+    assert!(alloc_pixmap_settings(0).is_null());
+}
+
+#[test]
+fn free_pixmap_settings_null_is_noop() {
+    unsafe { free_pixmap_settings(std::ptr::null_mut(), 0) };
+    unsafe { free_pixmap_settings(std::ptr::null_mut(), 2) };
 }
 
 #[test]
@@ -405,6 +513,8 @@ fn render_page_happy_path_defaults() {
             0,
             std::ptr::null(),
             0,
+            std::ptr::null(),
+            0,
             &mut width_out,
             &mut height_out,
         )
@@ -435,6 +545,8 @@ fn render_page_width_height_override() {
             1,
             std::ptr::null(),
             0,
+            std::ptr::null(),
+            0,
             json.as_ptr(),
             json.len(),
             &mut width_out,
@@ -462,6 +574,8 @@ fn render_page_bg_color_override_shows_in_untouched_corner() {
             1,
             std::ptr::null(),
             0,
+            std::ptr::null(),
+            0,
             json.as_ptr(),
             json.len(),
             &mut width_out,
@@ -479,18 +593,49 @@ fn render_page_bg_color_override_shows_in_untouched_corner() {
 }
 
 #[test]
-fn render_page_zero_area_scale_returns_null() {
-    // A tiny scale rounds the pixel dimensions down to 0x0 — confirmed
-    // against a real `hayro` render while writing this test. `width_out`/
-    // `height_out` must be left untouched (still their sentinel values).
-    let json = br#"{"x_scale":0.0001,"y_scale":0.0001}"#;
-    let mut width_out = 123u32;
-    let mut height_out = 456u32;
+fn render_page_zero_area_canvas_returns_null() {
+    // `width_out`/`height_out` must be left untouched (still their
+    // sentinel values).
+    for json in [
+        br#"{"width":0}"#.as_slice(),
+        br#"{"height":0}"#,
+        br#"{"width":0,"height":0}"#,
+    ] {
+        let mut width_out = 123u32;
+        let mut height_out = 456u32;
+        let ptr = unsafe {
+            render_page(
+                MINIMAL_PDF.as_ptr(),
+                MINIMAL_PDF.len(),
+                1,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                json.as_ptr(),
+                json.len(),
+                &mut width_out,
+                &mut height_out,
+            )
+        };
+        assert!(ptr.is_null());
+        assert_eq!(width_out, 123);
+        assert_eq!(height_out, 456);
+    }
+}
+
+/// Render page 1 of `pdf` with the given render-settings JSON and default
+/// interpreter settings, returning the pixels and their width/height.
+fn render_with_settings(pdf: &[u8], json: &[u8]) -> (Vec<u8>, u32, u32) {
+    let mut width_out = 0u32;
+    let mut height_out = 0u32;
     let ptr = unsafe {
         render_page(
-            MINIMAL_PDF.as_ptr(),
-            MINIMAL_PDF.len(),
+            pdf.as_ptr(),
+            pdf.len(),
             1,
+            std::ptr::null(),
+            0,
             std::ptr::null(),
             0,
             json.as_ptr(),
@@ -499,17 +644,77 @@ fn render_page_zero_area_scale_returns_null() {
             &mut height_out,
         )
     };
-    assert!(ptr.is_null());
-    assert_eq!(width_out, 123);
-    assert_eq!(height_out, 456);
+    assert!(!ptr.is_null());
+
+    let len = (width_out * height_out * 4) as usize;
+    let pixels = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    unsafe { free_pixels(ptr, width_out, height_out) };
+
+    (pixels, width_out, height_out)
+}
+
+/// Whether any pixel at or right of column `min_x` is not fully
+/// transparent.
+fn has_ink_right_of(pixels: &[u8], width: u32, min_x: u32) -> bool {
+    pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .any(|(i, px)| i as u32 % width >= min_x && px[3] != 0)
 }
 
 #[test]
-fn render_page_explicit_zero_scale_is_zero_area_not_default() {
-    // Confirms the semantic change end to end: `"x_scale":0.0` must *not*
-    // be reinterpreted as "use the default" the way the old byte layout's
-    // `0.0` sentinel was.
-    let json = br#"{"x_scale":0.0,"y_scale":0.0}"#;
+fn render_page_transform_scales_content() {
+    // The text ends around x = 180pt (see `MINIMAL_PDF`'s doc comment), so
+    // on a 400px-wide canvas it only reaches the right half when scaled up.
+    let (pixels, width, height) =
+        render_with_settings(MINIMAL_PDF, br#"{"width":400,"height":200}"#);
+    assert_eq!((width, height), (400, 200));
+    assert!(has_ink_right_of(&pixels, width, 0));
+    assert!(!has_ink_right_of(&pixels, width, 200));
+
+    let (pixels, width, height) = render_with_settings(
+        MINIMAL_PDF,
+        br#"{"width":400,"height":200,"transform":[2,0,0,2,0,0]}"#,
+    );
+    assert_eq!((width, height), (400, 200));
+    assert!(has_ink_right_of(&pixels, width, 200));
+}
+
+#[test]
+fn render_page_transform_translates_content() {
+    // Shifting the whole 200pt-wide page right by its own width leaves
+    // nothing on the canvas.
+    let (pixels, width, height) = render_with_settings(
+        MINIMAL_PDF,
+        br#"{"width":200,"height":100,"transform":[1,0,0,1,200,0]}"#,
+    );
+    assert_eq!((width, height), (200, 100));
+    assert!(!has_ink_right_of(&pixels, width, 0));
+}
+
+#[test]
+fn render_page_singular_transform_is_blank_not_a_crash() {
+    let (pixels, width, height) = render_with_settings(
+        MINIMAL_PDF,
+        br#"{"width":200,"height":100,"transform":[0,0,0,0,0,0]}"#,
+    );
+    assert_eq!((width, height), (200, 100));
+    assert!(!has_ink_right_of(&pixels, width, 0));
+}
+
+#[test]
+fn render_page_default_canvas_follows_page_rotation() {
+    // A 200x100pt page with `/Rotate 90` is 100x200 upright.
+    let (pixels, width, height) = render_with_settings(PDF_ROTATED_WITH_METADATA, b"{}");
+    assert_eq!((width, height), (100, 200));
+    assert!(has_ink_right_of(&pixels, width, 0));
+}
+
+#[test]
+fn render_page_transform_without_canvas_size_returns_null() {
+    let json = br#"{"transform":[2,0,0,2,0,0]}"#;
     let mut width_out = 0u32;
     let mut height_out = 0u32;
     let ptr = unsafe {
@@ -517,6 +722,8 @@ fn render_page_explicit_zero_scale_is_zero_area_not_default() {
             MINIMAL_PDF.as_ptr(),
             MINIMAL_PDF.len(),
             1,
+            std::ptr::null(),
+            0,
             std::ptr::null(),
             0,
             json.as_ptr(),
@@ -537,6 +744,8 @@ fn render_page_out_of_range_page_returns_null() {
             MINIMAL_PDF.as_ptr(),
             MINIMAL_PDF.len(),
             2,
+            std::ptr::null(),
+            0,
             std::ptr::null(),
             0,
             std::ptr::null(),
@@ -562,6 +771,65 @@ fn render_page_malformed_render_settings_json_returns_null() {
             0,
             json.as_ptr(),
             json.len(),
+            std::ptr::null(),
+            0,
+            &mut width_out,
+            &mut height_out,
+        )
+    };
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn render_page_force_image_interpolation_does_not_crash() {
+    // `MINIMAL_PDF` has no images, so this only checks that the
+    // render-settings blob is decoded and plumbed through, still producing
+    // a same-size image either way.
+    let payloads: [&[u8]; 2] = [
+        br#"{"force_image_interpolation":true}"#,
+        br#"{"force_image_interpolation":false}"#,
+    ];
+    for json in payloads {
+        let mut width_out = 0u32;
+        let mut height_out = 0u32;
+        let ptr = unsafe {
+            render_page(
+                MINIMAL_PDF.as_ptr(),
+                MINIMAL_PDF.len(),
+                1,
+                std::ptr::null(),
+                0,
+                json.as_ptr(),
+                json.len(),
+                std::ptr::null(),
+                0,
+                &mut width_out,
+                &mut height_out,
+            )
+        };
+        assert!(!ptr.is_null());
+        assert_eq!(width_out, 200);
+        assert_eq!(height_out, 100);
+        unsafe { free_pixels(ptr, width_out, height_out) };
+    }
+}
+
+#[test]
+fn render_page_malformed_pixmap_settings_json_returns_null() {
+    let json = b"not json";
+    let mut width_out = 0u32;
+    let mut height_out = 0u32;
+    let ptr = unsafe {
+        render_page(
+            MINIMAL_PDF.as_ptr(),
+            MINIMAL_PDF.len(),
+            1,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            json.as_ptr(),
+            json.len(),
             &mut width_out,
             &mut height_out,
         )
@@ -581,6 +849,8 @@ fn render_page_malformed_interpreter_settings_json_returns_null() {
             1,
             json.as_ptr(),
             json.len(),
+            std::ptr::null(),
+            0,
             std::ptr::null(),
             0,
             &mut width_out,
@@ -610,6 +880,8 @@ fn render_page_render_annotations_does_not_crash() {
                 1,
                 json.as_ptr(),
                 json.len(),
+                std::ptr::null(),
+                0,
                 std::ptr::null(),
                 0,
                 &mut width_out,
