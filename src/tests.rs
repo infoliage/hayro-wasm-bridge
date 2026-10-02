@@ -95,36 +95,32 @@ startxref
 #[test]
 fn render_settings_null_ptr_is_default() {
     let settings = unsafe { read_render_settings(std::ptr::null(), 0) }.unwrap();
-    let defaults = RenderSettings::default();
-    assert_eq!(settings.x_scale, defaults.x_scale);
-    assert_eq!(settings.y_scale, defaults.y_scale);
-    assert_eq!(settings.width, defaults.width);
-    assert_eq!(settings.height, defaults.height);
-    assert_eq!(settings.bg_color.to_rgba8(), defaults.bg_color.to_rgba8());
+    assert_eq!(settings.width, None);
+    assert_eq!(settings.height, None);
+    assert_eq!(settings.transform, Affine::IDENTITY);
+    assert_eq!(settings.bg_color.to_rgba8(), TRANSPARENT.to_rgba8());
 }
 
 #[test]
 fn render_settings_empty_object_is_default() {
-    // `{}` is the JSON equivalent of the old zeroed-blob convention: every
-    // field absent, so every field falls back to `hayro`'s default.
     let json = b"{}";
     let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
-    let defaults = RenderSettings::default();
-    assert_eq!(settings.x_scale, defaults.x_scale);
-    assert_eq!(settings.y_scale, defaults.y_scale);
-    assert_eq!(settings.width, defaults.width);
-    assert_eq!(settings.height, defaults.height);
-    assert_eq!(settings.bg_color.to_rgba8(), defaults.bg_color.to_rgba8());
+    assert_eq!(settings.width, None);
+    assert_eq!(settings.height, None);
+    assert_eq!(settings.transform, Affine::IDENTITY);
+    assert_eq!(settings.bg_color.to_rgba8(), TRANSPARENT.to_rgba8());
 }
 
 #[test]
 fn render_settings_decodes_explicit_values() {
-    let json = br#"{"x_scale":2.5,"y_scale":3.5,"width":800,"height":600,"bg_color":{"r":10,"g":20,"b":30,"a":128}}"#;
+    let json = br#"{"width":800,"height":600,"transform":[2.5,0.5,-0.5,3.5,10,20],"bg_color":{"r":10,"g":20,"b":30,"a":128}}"#;
     let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
-    assert_eq!(settings.x_scale, 2.5);
-    assert_eq!(settings.y_scale, 3.5);
     assert_eq!(settings.width, Some(800));
     assert_eq!(settings.height, Some(600));
+    assert_eq!(
+        settings.transform.as_coeffs(),
+        [2.5, 0.5, -0.5, 3.5, 10.0, 20.0]
+    );
     assert_eq!(
         settings.bg_color.to_rgba8(),
         AlphaColor::from_rgba8(10, 20, 30, 128).to_rgba8()
@@ -135,20 +131,40 @@ fn render_settings_decodes_explicit_values() {
 fn render_settings_partial_object_only_overrides_what_is_set() {
     let json = br#"{"width":800}"#;
     let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
-    let defaults = RenderSettings::default();
     assert_eq!(settings.width, Some(800));
-    assert_eq!(settings.height, defaults.height);
-    assert_eq!(settings.x_scale, defaults.x_scale);
+    assert_eq!(settings.height, None);
+    assert_eq!(settings.transform, Affine::IDENTITY);
 }
 
 #[test]
-fn render_settings_explicit_zero_scale_is_not_default() {
-    // The whole point of moving to real JSON `option`s instead of the old
-    // "0 means default" byte convention: an explicit 0.0 is honored
-    // literally now, not silently reinterpreted.
-    let json = br#"{"x_scale":0.0}"#;
-    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
-    assert_eq!(settings.x_scale, 0.0);
+fn render_settings_transform_without_canvas_size_is_an_error() {
+    // A transform has no canvas size that is obviously right for it, so
+    // the host has to say what it wants rather than get the page's own.
+    for json in [
+        br#"{"transform":[2,0,0,2,0,0]}"#.as_slice(),
+        br#"{"transform":[2,0,0,2,0,0],"width":400}"#,
+        br#"{"transform":[2,0,0,2,0,0],"height":200}"#,
+    ] {
+        assert!(
+            unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
+}
+
+#[test]
+fn render_settings_transform_with_wrong_length_is_an_error() {
+    for json in [
+        br#"{"width":1,"height":1,"transform":[1,0,0,1,0]}"#.as_slice(),
+        br#"{"width":1,"height":1,"transform":[1,0,0,1,0,0,0]}"#,
+    ] {
+        assert!(
+            unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -161,13 +177,13 @@ fn render_settings_malformed_json_is_an_error() {
 fn render_settings_unknown_field_is_an_error() {
     // Catches typos/drift between the host and this module's field names,
     // rather than silently ignoring an unrecognized field.
-    let json = br#"{"xscale":2.5}"#;
+    let json = br#"{"widht":800}"#;
     assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
 }
 
 #[test]
 fn render_settings_wrong_field_type_is_an_error() {
-    let json = br#"{"x_scale":"not a number"}"#;
+    let json = br#"{"width":"not a number"}"#;
     assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
 }
 
@@ -268,7 +284,7 @@ fn interpreter_settings_wrong_top_level_shape_is_an_error() {
     // array is legitimately equivalent to `{"render_annotations": true}`
     // as far as serde is concerned - not a bug, just worth knowing about
     // for a one-field settings struct specifically. `RenderSettingsJson`
-    // has five fields, so this doesn't come up for it (see the
+    // has four fields, so this doesn't come up for it (see the
     // `render_settings` equivalent of this test).
     for json in [b"[true, false]".as_slice(), b"\"oops\"", b"1", b"null"] {
         assert!(
@@ -479,17 +495,44 @@ fn render_page_bg_color_override_shows_in_untouched_corner() {
 }
 
 #[test]
-fn render_page_zero_area_scale_returns_null() {
-    // A tiny scale rounds the pixel dimensions down to 0x0 — confirmed
-    // against a real `hayro` render while writing this test. `width_out`/
-    // `height_out` must be left untouched (still their sentinel values).
-    let json = br#"{"x_scale":0.0001,"y_scale":0.0001}"#;
-    let mut width_out = 123u32;
-    let mut height_out = 456u32;
+fn render_page_zero_area_canvas_returns_null() {
+    // `width_out`/`height_out` must be left untouched (still their
+    // sentinel values).
+    for json in [
+        br#"{"width":0}"#.as_slice(),
+        br#"{"height":0}"#,
+        br#"{"width":0,"height":0}"#,
+    ] {
+        let mut width_out = 123u32;
+        let mut height_out = 456u32;
+        let ptr = unsafe {
+            render_page(
+                MINIMAL_PDF.as_ptr(),
+                MINIMAL_PDF.len(),
+                1,
+                std::ptr::null(),
+                0,
+                json.as_ptr(),
+                json.len(),
+                &mut width_out,
+                &mut height_out,
+            )
+        };
+        assert!(ptr.is_null());
+        assert_eq!(width_out, 123);
+        assert_eq!(height_out, 456);
+    }
+}
+
+/// Render page 1 of `pdf` with the given render-settings JSON and default
+/// interpreter settings, returning the pixels and their width/height.
+fn render_with_settings(pdf: &[u8], json: &[u8]) -> (Vec<u8>, u32, u32) {
+    let mut width_out = 0u32;
+    let mut height_out = 0u32;
     let ptr = unsafe {
         render_page(
-            MINIMAL_PDF.as_ptr(),
-            MINIMAL_PDF.len(),
+            pdf.as_ptr(),
+            pdf.len(),
             1,
             std::ptr::null(),
             0,
@@ -499,17 +542,75 @@ fn render_page_zero_area_scale_returns_null() {
             &mut height_out,
         )
     };
-    assert!(ptr.is_null());
-    assert_eq!(width_out, 123);
-    assert_eq!(height_out, 456);
+    assert!(!ptr.is_null());
+
+    let len = (width_out * height_out * 4) as usize;
+    let pixels = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    unsafe { free_pixels(ptr, width_out, height_out) };
+
+    (pixels, width_out, height_out)
+}
+
+/// Whether any pixel at or right of column `min_x` is not fully
+/// transparent.
+fn has_ink_right_of(pixels: &[u8], width: u32, min_x: u32) -> bool {
+    pixels
+        .chunks_exact(4)
+        .enumerate()
+        .any(|(i, px)| i as u32 % width >= min_x && px[3] != 0)
 }
 
 #[test]
-fn render_page_explicit_zero_scale_is_zero_area_not_default() {
-    // Confirms the semantic change end to end: `"x_scale":0.0` must *not*
-    // be reinterpreted as "use the default" the way the old byte layout's
-    // `0.0` sentinel was.
-    let json = br#"{"x_scale":0.0,"y_scale":0.0}"#;
+fn render_page_transform_scales_content() {
+    // The text ends around x = 180pt (see `MINIMAL_PDF`'s doc comment), so
+    // on a 400px-wide canvas it only reaches the right half when scaled up.
+    let (pixels, width, height) =
+        render_with_settings(MINIMAL_PDF, br#"{"width":400,"height":200}"#);
+    assert_eq!((width, height), (400, 200));
+    assert!(has_ink_right_of(&pixels, width, 0));
+    assert!(!has_ink_right_of(&pixels, width, 200));
+
+    let (pixels, width, height) = render_with_settings(
+        MINIMAL_PDF,
+        br#"{"width":400,"height":200,"transform":[2,0,0,2,0,0]}"#,
+    );
+    assert_eq!((width, height), (400, 200));
+    assert!(has_ink_right_of(&pixels, width, 200));
+}
+
+#[test]
+fn render_page_transform_translates_content() {
+    // Shifting the whole 200pt-wide page right by its own width leaves
+    // nothing on the canvas.
+    let (pixels, width, height) = render_with_settings(
+        MINIMAL_PDF,
+        br#"{"width":200,"height":100,"transform":[1,0,0,1,200,0]}"#,
+    );
+    assert_eq!((width, height), (200, 100));
+    assert!(!has_ink_right_of(&pixels, width, 0));
+}
+
+#[test]
+fn render_page_singular_transform_is_blank_not_a_crash() {
+    let (pixels, width, height) = render_with_settings(
+        MINIMAL_PDF,
+        br#"{"width":200,"height":100,"transform":[0,0,0,0,0,0]}"#,
+    );
+    assert_eq!((width, height), (200, 100));
+    assert!(!has_ink_right_of(&pixels, width, 0));
+}
+
+#[test]
+fn render_page_default_canvas_follows_page_rotation() {
+    // A 200x100pt page with `/Rotate 90` is 100x200 upright.
+    let (pixels, width, height) = render_with_settings(PDF_ROTATED_WITH_METADATA, b"{}");
+    assert_eq!((width, height), (100, 200));
+    assert!(has_ink_right_of(&pixels, width, 0));
+}
+
+#[test]
+fn render_page_transform_without_canvas_size_returns_null() {
+    let json = br#"{"transform":[2,0,0,2,0,0]}"#;
     let mut width_out = 0u32;
     let mut height_out = 0u32;
     let ptr = unsafe {

@@ -9,7 +9,7 @@
   "properties": {
     "width": {
       "type": "number",
-      "description": "Page width in points. The pixel width render_page would produce at x_scale 1.0 and no explicit width override, i.e. hayro's Page::render_dimensions() - already accounts for the page's /Rotate entry (swapped for a 90/270 degree rotation)."
+      "description": "Page width in points, as displayed, i.e. hayro's Page::render_dimensions() - already accounts for the page's /Rotate entry (swapped for a 90/270 degree rotation). With no render settings, render_page produces an image this many pixels wide (truncated to a whole number)."
     },
     "height": {
       "type": "number",

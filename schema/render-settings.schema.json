@@ -2,33 +2,35 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hayro-wasm-bridge/schema/render-settings.schema.json",
   "title": "RenderSettings",
-  "description": "Mirrors hayro::RenderSettings field-for-field except bg_color. Every field is optional; an absent field means \"use hayro's default for it\". This is documentation, kept in sync by hand with the RenderSettingsJson struct in src/lib.rs, not something validated against at runtime — serde's own typed deserialization there already rejects anything this schema would catch (wrong types, out-of-range numbers, unknown fields).",
+  "description": "Mirrors the arguments of hayro::render_into. Every field is optional; an absent field means \"use the default for it\". This is documentation, kept in sync by hand with the RenderSettingsJson struct in src/lib.rs, not something validated against at runtime — serde's own typed deserialization there already rejects anything this schema would catch (wrong types, out-of-range numbers, unknown fields).",
   "type": "object",
   "additionalProperties": false,
+  "dependentRequired": {
+    "transform": ["width", "height"]
+  },
   "properties": {
-    "x_scale": {
-      "type": "number",
-      "description": "Horizontal scale factor. Absent means \"use hayro's default\" (1.0). An explicit 0.0 is honored literally (producing a zero-area, and thus failing, render) - it is not treated the same as absent."
-    },
-    "y_scale": {
-      "type": "number",
-      "description": "Vertical scale factor. Absent means \"use hayro's default\" (1.0). Same explicit-zero handling as x_scale."
-    },
     "width": {
       "type": "integer",
       "minimum": 0,
       "maximum": 65535,
-      "description": "Target pixel width. Absent means \"auto\" (derived from the page size and scale)."
+      "description": "Canvas width in pixels. Absent means the page's own width (page-info's width, truncated to whole pixels). Required when transform is present. A zero-area canvas fails the render."
     },
     "height": {
       "type": "integer",
       "minimum": 0,
       "maximum": 65535,
-      "description": "Target pixel height. Absent means \"auto\" (derived from the page size and scale)."
+      "description": "Canvas height in pixels. Absent means the page's own height (page-info's height, truncated to whole pixels). Required when transform is present. A zero-area canvas fails the render."
+    },
+    "transform": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 6,
+      "maxItems": 6,
+      "description": "Affine transform [a, b, c, d, e, f], meaning x' = a*x + c*y + e and y' = b*x + d*y + f (the same coefficient order as kurbo::Affine). Maps upright page space - points, origin at the page's top-left corner, y pointing down, with the page's /Rotate entry and crop box already applied - to canvas pixels. Absent means the identity, i.e. one pixel per point. Nothing outside the page's crop box is drawn, whatever the transform."
     },
     "bg_color": {
       "$ref": "#/$defs/rgba",
-      "description": "Background color. Absent means \"use hayro's default\" (i.e. #00000000 - fully transparent black)."
+      "description": "What the canvas is cleared to before the page is drawn. Absent means #00000000 - fully transparent black."
     }
   },
   "$defs": {
