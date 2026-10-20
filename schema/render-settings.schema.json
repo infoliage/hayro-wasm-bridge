@@ -2,13 +2,27 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hayro-wasm-bridge/schema/render-settings.schema.json",
   "title": "RenderSettings",
-  "description": "Mirrors hayro::RenderSettings. This is documentation, kept in sync by hand with the RenderSettingsJson struct in src/lib.rs, not something validated against at runtime.",
+  "description": "Mirrors hayro::RenderSettings; not all settings are supported. This is documentation, kept in sync by hand with the RenderSettingsJson struct, and not used at runtime.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "force_image_interpolation": {
       "type": "boolean",
-      "description": "true draws every image with bilinear interpolation, whatever the PDF asks for. Absent means \"use hayro's default\" (read from RenderSettings::default() at call time, not hardcoded here)."
+      "description": "true draws every image with bilinear interpolation, whatever the PDF asks for. Absent follows hayro's default (read from RenderSettings::default())."
+    },
+    "aliasing_threshold": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "If set, anti-aliasing is disabled and a pixel is painted only when its coverage exceeds this value. Absent (hayro's default) keeps anti-aliasing on."
+    },
+    "hinting": {
+      "type": "boolean",
+      "description": "Whether text should be hinted. Absent follows hayro's default (read from RenderSettings::default())."
+    },
+    "glyph_caching": {
+      "type": "boolean",
+      "description": "Whether rasterized glyphs should be cached and reused. Absent follows hayro's default (read from RenderSettings::default())."
     }
   }
 }

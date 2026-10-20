@@ -40,8 +40,8 @@
 //!    [`free_pixmap_settings`] if you used them, [`free_u32`] (for
 //!    each of the two output cells), and [`free_pixels`] for the result.
 
-use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_interpret::util::TransformExt;
+use hayro::hayro_interpret::{InterpreterSettings, RenderContent};
 use hayro::hayro_syntax::object::{DateTime, Rect};
 use hayro::hayro_syntax::page::{Page, Rotation};
 use hayro::hayro_syntax::{Pdf, PdfVersion};
@@ -66,6 +66,9 @@ mod tests;
 #[serde(deny_unknown_fields)]
 struct RenderSettingsJson {
     force_image_interpolation: Option<bool>,
+    aliasing_threshold: Option<u8>,
+    hinting: Option<bool>,
+    glyph_caching: Option<bool>,
 }
 
 /// The JSON shape of a pixmap-settings blob — see [`render_page`]'s docs,
@@ -123,6 +126,7 @@ struct RgbaJson {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InterpreterSettingsJson {
+    render_page: Option<bool>,
     render_annotations: Option<bool>,
 }
 
@@ -207,11 +211,11 @@ fn version_str(version: PdfVersion) -> &'static str {
     }
 }
 
-/// Lossily decode one of `Metadata`'s `Option<Vec<u8>>` string fields to
+/// Lossily decode one of `Metadata`'s `Option<Box<[u8]>>` string fields to
 /// UTF-8 (invalid sequences become `U+FFFD`) — the PDF spec allows these to
 /// be arbitrary byte strings, and a stray non-UTF-8 byte shouldn't fail the
 /// whole [`document_info`] call.
-fn lossy_string(bytes: &Option<Vec<u8>>) -> Option<String> {
+fn lossy_string(bytes: &Option<Box<[u8]>>) -> Option<String> {
     bytes
         .as_deref()
         .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -607,11 +611,20 @@ pub unsafe extern "C" fn free_document_info(ptr: *mut u8, len: u32) {
 /// field". Malformed JSON, or an object with an unrecognized field name, is
 /// treated as a failure the same as any other — see the return value below.
 ///
-/// **Render-settings JSON** (mirrors `hayro::RenderSettings`), one optional
-/// field:
+/// **Render-settings JSON** (mirrors `hayro::RenderSettings`), all fields
+/// optional:
 /// - `force_image_interpolation`: boolean. `true` draws every image with
 ///   bilinear interpolation, whatever the PDF asks for. Absent means "use
 ///   `hayro`'s default" (`false`).
+/// - `aliasing_threshold`: integer in `0..=255`. If set, anti-aliasing is
+///   disabled and a pixel is painted only when its coverage exceeds this
+///   value. Absent (or `null`) means "use `hayro`'s default" (unset, i.e.
+///   anti-aliasing on). While a threshold is set, `hayro` doesn't use its
+///   glyph cache, whatever `glyph_caching` says.
+/// - `hinting`: boolean. Whether text is hinted. Absent means "use
+///   `hayro`'s default" (`true`).
+/// - `glyph_caching`: boolean. Whether rasterized glyphs are cached and
+///   reused. Absent means "use `hayro`'s default" (`true`).
 ///
 /// **Pixmap-settings JSON** (the output canvas — what `hayro` splits between
 /// `PixmapSettings` and the `ctx`/`transform` arguments of
@@ -632,9 +645,17 @@ pub unsafe extern "C" fn free_document_info(ptr: *mut u8, len: u32) {
 ///   `0..=255`, which the canvas is cleared to before the page is drawn.
 ///   Absent means `#00000000` — fully transparent black.
 ///
-/// **Interpreter-settings JSON** (mirrors one field of
-/// `hayro_interpret::InterpreterSettings`), one optional field:
-/// - `render_annotations`: boolean. Absent means "use `hayro`'s default".
+/// **Interpreter-settings JSON** (mirrors the subset of
+/// `hayro_interpret::InterpreterSettings` this bridge exposes), all fields
+/// optional. Each boolean switches one bit of its `render_content`
+/// bitflags; an absent one leaves that bit at `hayro`'s default (which is
+/// on, for both), independently of the other:
+/// - `render_page`: boolean. Whether the page's own content stream is
+///   drawn (`RenderContent::PAGE`).
+/// - `render_annotations`: boolean. Whether the page's annotations are
+///   drawn (`RenderContent::ANNOTATIONS`).
+///
+/// With both `false`, the result is a canvas holding just `bg_color`.
 ///
 /// Hayro's version of `InterpreterSettings` also has `font_resolver`,
 /// `cmap_resolver`, and `warning_sink` fields, which are Rust closures and have
@@ -824,6 +845,9 @@ unsafe fn read_render_settings(
         force_image_interpolation: json
             .force_image_interpolation
             .unwrap_or(defaults.force_image_interpolation),
+        aliasing_threshold: json.aliasing_threshold.or(defaults.aliasing_threshold),
+        hinting: json.hinting.unwrap_or(defaults.hinting),
+        glyph_caching: json.glyph_caching.unwrap_or(defaults.glyph_caching),
     })
 }
 
@@ -893,10 +917,15 @@ unsafe fn read_interpreter_settings(
     let json: InterpreterSettingsJson = serde_json::from_slice(bytes)?;
 
     let defaults = InterpreterSettings::default();
+    let mut render_content = defaults.render_content;
+    if let Some(enabled) = json.render_page {
+        render_content.set(RenderContent::PAGE, enabled);
+    }
+    if let Some(enabled) = json.render_annotations {
+        render_content.set(RenderContent::ANNOTATIONS, enabled);
+    }
     Ok(InterpreterSettings {
-        render_annotations: json
-            .render_annotations
-            .unwrap_or(defaults.render_annotations),
+        render_content,
         ..defaults
     })
 }
