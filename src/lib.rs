@@ -207,11 +207,11 @@ fn version_str(version: PdfVersion) -> &'static str {
     }
 }
 
-/// Lossily decode one of `Metadata`'s `Option<Vec<u8>>` string fields to
+/// Lossily decode one of `Metadata`'s `Option<Box<[u8]>>` string fields to
 /// UTF-8 (invalid sequences become `U+FFFD`) — the PDF spec allows these to
 /// be arbitrary byte strings, and a stray non-UTF-8 byte shouldn't fail the
 /// whole [`document_info`] call.
-fn lossy_string(bytes: &Option<Vec<u8>>) -> Option<String> {
+fn lossy_string(bytes: &Option<Box<[u8]>>) -> Option<String> {
     bytes
         .as_deref()
         .map(|b| String::from_utf8_lossy(b).into_owned())

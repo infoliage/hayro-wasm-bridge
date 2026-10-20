@@ -19,6 +19,6 @@ crate-type = ["cdylib"]
 # feature set too, but we list them explicitly so text rendering (standard
 # 14 fonts + predefined cmaps) keeps working here even if that default ever
 # changes upstream.
-hayro = { version = "0.8.0", features = ["embed-fonts", "embed-cmaps"] }
+hayro = { git = "https://github.com/laurenzv/hayro.git", rev = "036fb21ca751a6afbaef5b79caaa8a62ee2f931c", features = ["embed-fonts", "embed-cmaps"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

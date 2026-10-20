@@ -212,8 +212,7 @@ dependencies = [
 [[package]]
 name = "hayro"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4675ff5acd7ca41c0c34ccd2a3a154f5c86d8b5ec92bef0a114bfb194969e2af"
+source = "git+https://github.com/laurenzv/hayro.git?rev=036fb21ca751a6afbaef5b79caaa8a62ee2f931c#036fb21ca751a6afbaef5b79caaa8a62ee2f931c"
 dependencies = [
  "bytemuck",
  "fearless_simd 1.0.0",
@@ -228,14 +227,12 @@ dependencies = [
 [[package]]
 name = "hayro-ccitt"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2866f0d976e76497480b853d5e258dab6e4b89ecfe991124e08f15dfa8fd03ad"
+source = "git+https://github.com/laurenzv/hayro.git?rev=036fb21ca751a6afbaef5b79caaa8a62ee2f931c#036fb21ca751a6afbaef5b79caaa8a62ee2f931c"
 
 [[package]]
 name = "hayro-cmap"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24d285dc30731c8485de5fa732fbdf2b3affdf01e4da7c2135022ca6fa664bf6"
+source = "git+https://github.com/laurenzv/hayro.git?rev=036fb21ca751a6afbaef5b79caaa8a62ee2f931c#036fb21ca751a6afbaef5b79caaa8a62ee2f931c"
 dependencies = [
  "brotli",
  "hayro-postscript",
@@ -244,8 +241,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac9df074ff163a63864cec9b0bf640ccbff8abf4e44481df7369ce0ac172ffbe"
+source = "git+https://github.com/laurenzv/hayro.git?rev=036fb21ca751a6afbaef5b79caaa8a62ee2f931c#036fb21ca751a6afbaef5b79caaa8a62ee2f931c"
 dependencies = [
  "bitflags",
  "hayro-cmap",
@@ -263,8 +259,7 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "000e025850f4592ddcaee85640db70704151f2bafd43b6f431aa5b6a2c6a35a9"
+source = "git+https://github.com/laurenzv/hayro.git?rev=036fb21ca751a6afbaef5b79caaa8a62ee2f931c#036fb21ca751a6afbaef5b79caaa8a62ee2f931c"
 dependencies = [
  "fearless_simd 1.0.0",
  "hayro-ccitt",
@@ -273,8 +268,7 @@ dependencies = [
 [[package]]
 name = "hayro-jpeg2000"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "122c5f834c37a2260b9c851bb8be685cf539b2a8b94b704a931ef7d2525d5835"
+source = "git+https://github.com/laurenzv/hayro.git?rev=036fb21ca751a6afbaef5b79caaa8a62ee2f931c#036fb21ca751a6afbaef5b79caaa8a62ee2f931c"
 dependencies = [
  "fearless_simd 1.0.0",
 ]
@@ -282,14 +276,12 @@ dependencies = [
 [[package]]
 name = "hayro-postscript"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
+source = "git+https://github.com/laurenzv/hayro.git?rev=036fb21ca751a6afbaef5b79caaa8a62ee2f931c#036fb21ca751a6afbaef5b79caaa8a62ee2f931c"
 
 [[package]]
 name = "hayro-syntax"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cdc818d8d265dcb42081d488f7599df4f73fb79e9d347ecedcd3c23809d2026"
+source = "git+https://github.com/laurenzv/hayro.git?rev=036fb21ca751a6afbaef5b79caaa8a62ee2f931c#036fb21ca751a6afbaef5b79caaa8a62ee2f931c"
 dependencies = [
  "flate2",
  "hayro-ccitt",
