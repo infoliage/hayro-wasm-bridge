@@ -228,8 +228,8 @@ fn pixmap_settings_empty_body_with_nonnull_ptr_is_an_error() {
 fn interpreter_settings_null_ptr_is_default() {
     let settings = unsafe { read_interpreter_settings(std::ptr::null(), 0) }.unwrap();
     assert_eq!(
-        settings.render_annotations,
-        InterpreterSettings::default().render_annotations
+        settings.render_content,
+        InterpreterSettings::default().render_content
     );
 }
 
@@ -238,23 +238,69 @@ fn interpreter_settings_empty_object_is_default() {
     let json = b"{}";
     let settings = unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.unwrap();
     assert_eq!(
-        settings.render_annotations,
-        InterpreterSettings::default().render_annotations
+        settings.render_content,
+        InterpreterSettings::default().render_content
+    );
+}
+
+/// Decode `json` as an interpreter-settings blob and return just its
+/// `render_content`, panicking if it doesn't decode.
+fn decode_render_content(json: &[u8]) -> RenderContent {
+    unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }
+        .unwrap()
+        .render_content
+}
+
+// `hayro`'s default is `RenderContent::all()`, so a `true` on its own
+// can't be told apart from the field being ignored. Each test below pairs
+// the field under test with the other flag set the opposite way, or
+// compares against the default with exactly one bit flipped, so a decoder
+// that drops either field fails at least one of them.
+
+#[test]
+fn interpreter_settings_render_annotations_true_sets_its_bit() {
+    let json = br#"{"render_page":false,"render_annotations":true}"#;
+    assert_eq!(decode_render_content(json), RenderContent::ANNOTATIONS);
+}
+
+#[test]
+fn interpreter_settings_render_page_true_sets_its_bit() {
+    let json = br#"{"render_page":true,"render_annotations":false}"#;
+    assert_eq!(decode_render_content(json), RenderContent::PAGE);
+}
+
+#[test]
+fn interpreter_settings_render_annotations_false_clears_only_its_bit() {
+    let json = br#"{"render_annotations":false}"#;
+    assert_eq!(
+        decode_render_content(json),
+        InterpreterSettings::default()
+            .render_content
+            .difference(RenderContent::ANNOTATIONS)
     );
 }
 
 #[test]
-fn interpreter_settings_true_enables_annotations() {
-    let json = br#"{"render_annotations":true}"#;
-    let settings = unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.unwrap();
-    assert!(settings.render_annotations);
+fn interpreter_settings_render_page_false_clears_only_its_bit() {
+    let json = br#"{"render_page":false}"#;
+    assert_eq!(
+        decode_render_content(json),
+        InterpreterSettings::default()
+            .render_content
+            .difference(RenderContent::PAGE)
+    );
 }
 
 #[test]
-fn interpreter_settings_false_disables_annotations() {
-    let json = br#"{"render_annotations":false}"#;
-    let settings = unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.unwrap();
-    assert!(!settings.render_annotations);
+fn interpreter_settings_both_false_is_empty() {
+    let json = br#"{"render_page":false,"render_annotations":false}"#;
+    assert_eq!(decode_render_content(json), RenderContent::empty());
+}
+
+#[test]
+fn interpreter_settings_both_true_is_all() {
+    let json = br#"{"render_page":true,"render_annotations":true}"#;
+    assert_eq!(decode_render_content(json), RenderContent::all());
 }
 
 #[test]
@@ -265,8 +311,17 @@ fn interpreter_settings_malformed_json_is_an_error() {
 
 #[test]
 fn interpreter_settings_wrong_field_type_is_an_error() {
-    let json = br#"{"render_annotations":"yes"}"#;
-    assert!(unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.is_err());
+    for json in [
+        br#"{"render_annotations":"yes"}"#.as_slice(),
+        br#"{"render_page":"yes"}"#,
+        br#"{"render_page":1}"#,
+    ] {
+        assert!(
+            unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -277,16 +332,21 @@ fn interpreter_settings_unknown_field_is_an_error() {
 
 #[test]
 fn interpreter_settings_wrong_top_level_shape_is_an_error() {
-    // `[true]` is deliberately not in this list: serde's derived
+    // `[true, false]` is deliberately not in this list: serde's derived
     // `Deserialize` for a struct accepts a JSON array positionally (field
     // order = declaration order) as well as an object, and
-    // `InterpreterSettingsJson` has exactly one field, so a single-element
-    // array is legitimately equivalent to `{"render_annotations": true}`
-    // as far as serde is concerned - not a bug, just worth knowing about
-    // for a one-field settings struct specifically. `PixmapSettingsJson`
-    // has four fields, so this doesn't come up for it (see the
-    // `pixmap_settings` equivalent of this test).
-    for json in [b"[true, false]".as_slice(), b"\"oops\"", b"1", b"null"] {
+    // `InterpreterSettingsJson` has exactly two fields, so a two-element
+    // array is legitimately equivalent to
+    // `{"render_page": true, "render_annotations": false}` as far as serde
+    // is concerned - not a bug, just worth knowing about. An array of any
+    // other length is rejected for having the wrong number of elements.
+    for json in [
+        b"[true]".as_slice(),
+        b"[true, false, true]",
+        b"\"oops\"",
+        b"1",
+        b"null",
+    ] {
         assert!(
             unsafe { read_interpreter_settings(json.as_ptr(), json.len()) }.is_err(),
             "expected {:?} to be rejected",
@@ -303,23 +363,88 @@ fn interpreter_settings_empty_body_with_nonnull_ptr_is_an_error() {
 
 // ---- Render-settings blob decoding -----------------------------------------
 
+/// Assert every field of `settings` equals `expected`'s — `RenderSettings`
+/// doesn't implement `PartialEq`/`Debug` upstream, so it can't be compared
+/// whole.
+fn assert_render_settings_eq(settings: &RenderSettings, expected: &RenderSettings) {
+    assert_eq!(
+        settings.force_image_interpolation,
+        expected.force_image_interpolation
+    );
+    assert_eq!(settings.aliasing_threshold, expected.aliasing_threshold);
+    assert_eq!(settings.hinting, expected.hinting);
+    assert_eq!(settings.glyph_caching, expected.glyph_caching);
+}
+
 #[test]
 fn render_settings_null_ptr_is_default() {
     let settings = unsafe { read_render_settings(std::ptr::null(), 0) }.unwrap();
-    assert_eq!(
-        settings.force_image_interpolation,
-        RenderSettings::default().force_image_interpolation
-    );
+    assert_render_settings_eq(&settings, &RenderSettings::default());
 }
 
 #[test]
 fn render_settings_empty_object_is_default() {
     let json = b"{}";
     let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
-    assert_eq!(
-        settings.force_image_interpolation,
-        RenderSettings::default().force_image_interpolation
+    assert_render_settings_eq(&settings, &RenderSettings::default());
+}
+
+#[test]
+fn render_settings_decodes_explicit_values() {
+    // Every value here is the opposite of `hayro`'s default, so a field
+    // the decoder ignored would show up as a mismatch.
+    let json = br#"{"force_image_interpolation":true,"aliasing_threshold":128,"hinting":false,"glyph_caching":false}"#;
+    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
+    assert_render_settings_eq(
+        &settings,
+        &RenderSettings {
+            force_image_interpolation: true,
+            aliasing_threshold: Some(128),
+            hinting: false,
+            glyph_caching: false,
+        },
     );
+}
+
+#[test]
+fn render_settings_partial_object_only_overrides_what_is_set() {
+    let json = br#"{"hinting":false}"#;
+    let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
+    assert_render_settings_eq(
+        &settings,
+        &RenderSettings {
+            hinting: false,
+            ..RenderSettings::default()
+        },
+    );
+}
+
+#[test]
+fn render_settings_aliasing_threshold_bounds() {
+    for (json, expected) in [
+        (br#"{"aliasing_threshold":0}"#.as_slice(), Some(0)),
+        (br#"{"aliasing_threshold":255}"#, Some(255)),
+        // JSON `null` decodes the same as an absent field.
+        (br#"{"aliasing_threshold":null}"#, None),
+    ] {
+        let settings = unsafe { read_render_settings(json.as_ptr(), json.len()) }.unwrap();
+        assert_eq!(settings.aliasing_threshold, expected);
+    }
+}
+
+#[test]
+fn render_settings_out_of_range_aliasing_threshold_is_an_error() {
+    for json in [
+        br#"{"aliasing_threshold":256}"#.as_slice(),
+        br#"{"aliasing_threshold":-1}"#,
+        br#"{"aliasing_threshold":0.5}"#,
+    ] {
+        assert!(
+            unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -344,8 +469,19 @@ fn render_settings_malformed_json_is_an_error() {
 
 #[test]
 fn render_settings_wrong_field_type_is_an_error() {
-    let json = br#"{"force_image_interpolation":"yes"}"#;
-    assert!(unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err());
+    for json in [
+        br#"{"force_image_interpolation":"yes"}"#.as_slice(),
+        br#"{"aliasing_threshold":true}"#,
+        br#"{"aliasing_threshold":"128"}"#,
+        br#"{"hinting":"yes"}"#,
+        br#"{"glyph_caching":1}"#,
+    ] {
+        assert!(
+            unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err(),
+            "expected {:?} to be rejected",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -357,9 +493,9 @@ fn render_settings_unknown_field_is_an_error() {
 
 #[test]
 fn render_settings_wrong_top_level_shape_is_an_error() {
-    // `[true]` is not in this list for the same reason as in the
-    // `interpreter_settings` equivalent of this test: `RenderSettingsJson`
-    // has exactly one field too.
+    // A four-element array is not in this list for the same reason a
+    // two-element one isn't in the `interpreter_settings` equivalent of
+    // this test: `RenderSettingsJson` has exactly four fields.
     for json in [b"[true, false]".as_slice(), b"\"oops\"", b"1", b"null"] {
         assert!(
             unsafe { read_render_settings(json.as_ptr(), json.len()) }.is_err(),
@@ -624,8 +760,9 @@ fn render_page_zero_area_canvas_returns_null() {
     }
 }
 
-/// Render page 1 of `pdf` with the given render-settings JSON and default
-/// interpreter settings, returning the pixels and their width/height.
+/// Render page 1 of `pdf` with the given pixmap-settings JSON and default
+/// interpreter and render settings, returning the pixels and their
+/// width/height.
 fn render_with_settings(pdf: &[u8], json: &[u8]) -> (Vec<u8>, u32, u32) {
     let mut width_out = 0u32;
     let mut height_out = 0u32;
@@ -860,38 +997,115 @@ fn render_page_malformed_interpreter_settings_json_returns_null() {
     assert!(ptr.is_null());
 }
 
+/// Render page 1 of `MINIMAL_PDF` with the given interpreter-settings and
+/// render-settings JSON (an empty slice passes a null pointer, i.e. all
+/// defaults) and default pixmap settings, returning the pixels and their
+/// width/height.
+fn render_minimal_with(interpreter_json: &[u8], render_json: &[u8]) -> (Vec<u8>, u32, u32) {
+    fn ptr_or_null(json: &[u8]) -> *const u8 {
+        if json.is_empty() {
+            std::ptr::null()
+        } else {
+            json.as_ptr()
+        }
+    }
+
+    let mut width_out = 0u32;
+    let mut height_out = 0u32;
+    let ptr = unsafe {
+        render_page(
+            MINIMAL_PDF.as_ptr(),
+            MINIMAL_PDF.len(),
+            1,
+            ptr_or_null(interpreter_json),
+            interpreter_json.len(),
+            ptr_or_null(render_json),
+            render_json.len(),
+            std::ptr::null(),
+            0,
+            &mut width_out,
+            &mut height_out,
+        )
+    };
+    assert!(!ptr.is_null());
+
+    let len = (width_out * height_out * 4) as usize;
+    let pixels = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    unsafe { free_pixels(ptr, width_out, height_out) };
+
+    (pixels, width_out, height_out)
+}
+
 #[test]
 fn render_page_render_annotations_does_not_crash() {
     // `MINIMAL_PDF` has no annotations, so this only checks that the
     // interpreter-settings blob is decoded and plumbed through without
-    // panicking/crashing, still producing a same-size image either way.
-    // Actual annotation-rendering correctness is `hayro`'s own concern.
-    let payloads: [&[u8]; 2] = [
-        br#"{"render_annotations":true}"#,
+    // panicking/crashing, still producing a same-size image with the page's
+    // text either way. Actual annotation-rendering correctness is `hayro`'s
+    // own concern.
+    for json in [
+        br#"{"render_annotations":true}"#.as_slice(),
         br#"{"render_annotations":false}"#,
-    ];
-    for json in payloads {
-        let mut width_out = 0u32;
-        let mut height_out = 0u32;
-        let ptr = unsafe {
-            render_page(
-                MINIMAL_PDF.as_ptr(),
-                MINIMAL_PDF.len(),
-                1,
-                json.as_ptr(),
-                json.len(),
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                &mut width_out,
-                &mut height_out,
-            )
-        };
-        assert!(!ptr.is_null());
-        assert_eq!(width_out, 200);
-        assert_eq!(height_out, 100);
-        unsafe { free_pixels(ptr, width_out, height_out) };
+    ] {
+        let (pixels, width, height) = render_minimal_with(json, b"");
+        assert_eq!((width, height), (200, 100));
+        assert!(has_ink_right_of(&pixels, width, 0));
+    }
+}
+
+#[test]
+fn render_page_render_page_false_skips_the_content_stream() {
+    // "Hello World" lives in `MINIMAL_PDF`'s content stream, so with
+    // `RenderContent::PAGE` cleared the canvas stays at its (transparent)
+    // background — but it's still a full-size canvas, not a failure.
+    for json in [
+        br#"{"render_page":false}"#.as_slice(),
+        br#"{"render_page":false,"render_annotations":false}"#,
+    ] {
+        let (pixels, width, height) = render_minimal_with(json, b"");
+        assert_eq!((width, height), (200, 100));
+        assert!(
+            !has_ink_right_of(&pixels, width, 0),
+            "expected {:?} to leave the canvas blank",
+            std::str::from_utf8(json).unwrap()
+        );
+    }
+}
+
+#[test]
+fn render_page_render_page_true_draws_the_content_stream() {
+    let (pixels, width, _) = render_minimal_with(br#"{"render_page":true}"#, b"");
+    assert!(has_ink_right_of(&pixels, width, 0));
+}
+
+#[test]
+fn render_page_aliasing_threshold_disables_anti_aliasing() {
+    // Anti-aliased text edges have partially transparent pixels; with a
+    // threshold set, every pixel is either fully painted or untouched.
+    let is_partial = |px: &[u8; 4]| px[3] != 0 && px[3] != 255;
+
+    let (pixels, _, _) = render_minimal_with(b"", b"");
+    assert!(pixels.as_chunks::<4>().0.iter().any(is_partial));
+
+    let (pixels, width, _) = render_minimal_with(b"", br#"{"aliasing_threshold":128}"#);
+    assert!(has_ink_right_of(&pixels, width, 0));
+    assert!(!pixels.as_chunks::<4>().0.iter().any(is_partial));
+}
+
+#[test]
+fn render_page_hinting_and_glyph_caching_do_not_crash() {
+    // Neither setting has an effect that's practical to assert on pixels,
+    // so this only checks that each combination is decoded and plumbed
+    // through, still producing a same-size image with the page's text.
+    for json in [
+        br#"{"hinting":true,"glyph_caching":true}"#.as_slice(),
+        br#"{"hinting":false,"glyph_caching":true}"#,
+        br#"{"hinting":true,"glyph_caching":false}"#,
+        br#"{"hinting":false,"glyph_caching":false}"#,
+    ] {
+        let (pixels, width, height) = render_minimal_with(b"", json);
+        assert_eq!((width, height), (200, 100));
+        assert!(has_ink_right_of(&pixels, width, 0));
     }
 }
 
